@@ -138,7 +138,8 @@ export async function catatPengeluaran(tanggalFull, deskripsi, nominal) {
             // Baris Data
             const cellHari = sheet.getCell(dataRowIdx, 0);
             cellHari.value = hariIndo;
-            cellHari.userEnteredFormat = { verticalAlignment: 'MIDDLE', horizontalAlignment: 'CENTER' };
+            cellHari.verticalAlignment = 'MIDDLE';
+            cellHari.horizontalAlignment = 'CENTER';
             
             sheet.getCell(dataRowIdx, 1).value = waktuIndo;
             sheet.getCell(dataRowIdx, 2).value = deskripsi;
@@ -153,10 +154,9 @@ export async function catatPengeluaran(tanggalFull, deskripsi, nominal) {
 
             // Warna Background Abu-abu Muda & Bold untuk Baris Total
             for (let c = 0; c < 4; c++) {
-                sheet.getCell(totalRowIdx, c).userEnteredFormat = {
-                    backgroundColor: { red: 0.95, green: 0.95, blue: 0.95 },
-                    textFormat: { bold: true }
-                };
+                const cell = sheet.getCell(totalRowIdx, c);
+                cell.backgroundColor = { red: 0.95, green: 0.95, blue: 0.95 };
+                cell.textFormat = { bold: true };
             }
 
             await sheet.saveUpdatedCells();
