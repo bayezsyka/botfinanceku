@@ -315,18 +315,16 @@ export async function hapusItems(itemsToDelete) {
 
         // Hapus satu per satu dari bawah ke atas
         for (const sheetIdx of sheetRowIndices) {
-            await sheet.spreadsheet.batchUpdate({
-                requests: [{
-                    deleteDimension: {
-                        range: {
-                            sheetId: sheet.sheetId,
-                            dimension: 'ROWS',
-                            startIndex: sheetIdx - 1, // API uses 0-based
-                            endIndex: sheetIdx
-                        }
+            await sheet._makeBatchUpdateRequest([{
+                deleteDimension: {
+                    range: {
+                        sheetId: sheet.sheetId,
+                        dimension: 'ROWS',
+                        startIndex: sheetIdx - 1, // API uses 0-based
+                        endIndex: sheetIdx
                     }
-                }]
-            });
+                }
+            }]);
         }
 
         // Sekarang recalculate total hari ini
@@ -365,35 +363,31 @@ export async function hapusItems(itemsToDelete) {
             const dataRowCount = totalRowIndex - blockStartIndex;
             if (dataRowCount <= 0) {
                 // Blok sudah kosong, hapus Total row juga
-                await sheet2.spreadsheet.batchUpdate({
-                    requests: [{
-                        deleteDimension: {
-                            range: {
-                                sheetId: sheet2.sheetId,
-                                dimension: 'ROWS',
-                                startIndex: totalSheetIdx - 1,
-                                endIndex: totalSheetIdx
-                            }
+                await sheet2._makeBatchUpdateRequest([{
+                    deleteDimension: {
+                        range: {
+                            sheetId: sheet2.sheetId,
+                            dimension: 'ROWS',
+                            startIndex: totalSheetIdx - 1,
+                            endIndex: totalSheetIdx
                         }
-                    }]
-                });
+                    }
+                }]);
             } else {
                 // Re-merge kolom Hari (vertical) jika masih ada data
                 try {
                     // Unmerge dulu supaya tidak error overlap
-                    await sheet2.spreadsheet.batchUpdate({
-                        requests: [{
-                            unmergeCells: {
-                                range: {
-                                    sheetId: sheet2.sheetId,
-                                    startRowIndex: blockStartIndex + 1,
-                                    endRowIndex: totalSheetIdx,
-                                    startColumnIndex: 0,
-                                    endColumnIndex: 1
-                                }
+                    await sheet2._makeBatchUpdateRequest([{
+                        unmergeCells: {
+                            range: {
+                                sheetId: sheet2.sheetId,
+                                startRowIndex: blockStartIndex + 1,
+                                endRowIndex: totalSheetIdx,
+                                startColumnIndex: 0,
+                                endColumnIndex: 1
                             }
-                        }]
-                    });
+                        }
+                    }]);
                 } catch { /* ignore if nothing to unmerge */ }
 
                 if (dataRowCount > 1) {
