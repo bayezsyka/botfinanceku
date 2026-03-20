@@ -1,9 +1,13 @@
-import makeWASocket, { DisconnectReason, useMultiFileAuthState } from '@whiskeysockets/baileys';
+import makeWASocket, { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, Browsers } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
 import dotenv from 'dotenv';
+import qrcode from 'qrcode-terminal';
 import { parseExpenseMessage } from './parser.js';
-import { catatPengeluaran } from './sheets.js';
+import { catatPengeluaran, getTodayData } from './sheets.js';
+
+// Variabel Session Store (Sederhana untuk handle reply hapus)
+let deleteSession = {};
 
 // Load environment variables dari .env file
 dotenv.config();
@@ -15,43 +19,37 @@ async function connectToWhatsApp() {
     // Session akan disimpan di folder auth_info_baileys
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
 
-    const sock = makeWASocket({
-        auth: state,
-        printQRInTerminal: false, // Set false karena request kode pairing di bawah
-        logger: pino({ level: 'silent' }), // Menyembunyikan log yang tidak penting
-        browser: ['Chrome (Finance Bot)', '', ''] // Browser yang dipakai untuk pairing code
-    });
+    // Ambil versi WA Web terbaru untuk mencegah bug 405
+    const { version } = await fetchLatestBaileysVersion();
 
-    // Fitur Pairing Code: Memperbolehkan masuk ke WhatsApp di nomor X (Bot Number) tanpa scan QR
-    if (!sock.authState.creds.registered) {
-        setTimeout(async () => {
-             console.log(`\n⚙️ Meminta kode pairing untuk nomor: ${BOT_NUMBER}`);
-             try {
-                const code = await sock.requestPairingCode(BOT_NUMBER);
-                console.log(`\n==========================================`);
-                console.log(`✨ KODE PAIRING ANDA: ${code?.match(/.{1,4}/g)?.join('-') || code}`);
-                console.log(`==========================================\n`);
-                console.log(`Masukkan kode ini di aplikasi WhatsApp -> Tautkan Perangkat`);
-             } catch(e) {
-                console.error('❌ Gagal mendapatkan kode pairing:', e);
-             }
-        }, 3000);
-    }
+    const sock = makeWASocket({
+        version,
+        auth: state,
+        logger: pino({ level: 'silent' }), // Menyembunyikan log yang tidak penting
+        browser: Browsers.macOS('Desktop') // Identitas default agar tidak diblokir WA
+    });
 
     // Event ketika state kredensial berubah (sukses login, dsb.)
     sock.ev.on('creds.update', saveCreds);
 
     // Event deteksi jika koneksi berubah (tersambung, putus)
     sock.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect } = update;
+        const { connection, lastDisconnect, qr } = update;
         
+        // Render QR Code manual jika tersedia
+        if (qr) {
+            qrcode.generate(qr, { small: true });
+            console.log('\n☝️ Scan QR Code di atas menggunakan WhatsApp Anda!');
+        }
+
         if (connection === 'close') {
-            const shouldReconnect = (lastDisconnect?.error instanceof Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
-            console.log('Koneksi terputus karena ter-logout atau masalah jaringan. Reconnecting:', shouldReconnect);
+            const reason = lastDisconnect?.error?.output?.statusCode;
+            const shouldReconnect = reason !== DisconnectReason.loggedOut;
+            console.log('Koneksi terputus. Kode alasan:', reason, '| Reconnecting:', shouldReconnect);
             
             // Reconnect jika errornya bukan karena logout dari perangkat
             if (shouldReconnect) {
-                connectToWhatsApp();
+                setTimeout(connectToWhatsApp, 3000); // Beri jeda 3 detik agar tidak spam loop
             }
         } else if (connection === 'open') {
             console.log('✅ Koneksi WhatsApp berhasil terhubung!');
@@ -85,35 +83,89 @@ async function connectToWhatsApp() {
                 return;
             }
 
-            // Parsing pengeluaran
+            // Fitur Hapus Pengeluaran Hari Ini
+            if (textMessage.toLowerCase() === 'hapus hari ini') {
+                try {
+                    const todayDate = new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta', year: 'numeric', month: '2-digit', day: '2-digit' }).replace(/\./g, ':');
+                    const items = await getTodayData(todayDate);
+
+                    if (items.length === 0) {
+                        await sock.sendMessage(senderNumber, { text: 'Belum ada pengeluaran hari ini yang bisa dihapus.' }, { quoted: msg });
+                        return;
+                    }
+
+                    let listMsg = '📊 *Daftar Pengeluaran Hari Ini:*\n\n';
+                    deleteSession[senderNumber] = {}; // Reset session pengirim
+
+                    items.forEach((item, index) => {
+                        const letter = String.fromCharCode(97 + index); // a, b, c, ...
+                        deleteSession[senderNumber][letter] = item.originalRow; // Simpan row mapping
+                        listMsg += `*${letter}.* ${item.description} - Rp${item.amount}\n`;
+                    });
+
+                    listMsg += '\nKetik hurufnya (misal: *a*) untuk menghapus.';
+                    await sock.sendMessage(senderNumber, { text: listMsg }, { quoted: msg });
+                    return;
+                } catch (err) {
+                    console.error('Error list hapus:', err);
+                    await sock.sendMessage(senderNumber, { text: 'Gagal mengambil data hapus.' }, { quoted: msg });
+                    return;
+                }
+            }
+
+            // Handle Input Huruf untuk Hapus (a, b, c...)
+            if (textMessage.length === 1 && /^[a-z]$/i.test(textMessage)) {
+                const letter = textMessage.toLowerCase();
+                const session = deleteSession[senderNumber];
+
+                if (session && session[letter]) {
+                    try {
+                        const rowToDelete = session[letter];
+                        const description = rowToDelete._rawData[1];
+                        const amount = rowToDelete._rawData[2];
+
+                        await rowToDelete.delete(); // Delete baris di Google Sheets
+                        delete deleteSession[senderNumber]; // Clear session
+
+                        await sock.sendMessage(senderNumber, { text: `✅ Berhasil menghapus *${description}* (Rp${amount}) dari catatan hari ini.` }, { quoted: msg });
+                        return;
+                    } catch (err) {
+                        console.error('Error delete row:', err);
+                        await sock.sendMessage(senderNumber, { text: 'Gagal menghapus data di Google Sheets.' }, { quoted: msg });
+                        return;
+                    }
+                }
+            }
+
+            // Parsing pengeluaran (Input Manual)
             const parsedData = parseExpenseMessage(textMessage);
 
             if (!parsedData) {
-                // Balasan jika tidak memenuhi kriteria regex parser.js
-                await sock.sendMessage(senderNumber, { text: 'Format salah bos! Ketik dengan format: [deskripsi] [nominal/k/rb]' }, { quoted: msg });
+                // Jangan bales kalau cuma ngetik random (abaikan pesan pendek non-format)
+                if (textMessage.split(' ').length > 1) {
+                    await sock.sendMessage(senderNumber, { text: 'Format salah bos! Ketik dengan format: [deskripsi] [nominal/k/rb]' }, { quoted: msg });
+                }
                 return;
             }
 
             try {
                 // Mendapatkan tanggal & waktu lengkap dengan timezone WIB
                 const dateOptions = { timeZone: 'Asia/Jakarta', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' };
-                // .replace mencegah format waktu lokal OS berubah jadi titik seperti (10.30)
                 const tanggalSekarang = new Date().toLocaleString('id-ID', dateOptions).replace(/\./g, ':');
                 
                 const { description, amount } = parsedData;
 
                 // Jalankan record transaksi ke Google Sheets
-                const isSuccess = await catatPengeluaran(tanggalSekarang, description, amount);
+                const result = await catatPengeluaran(tanggalSekarang, description, amount);
 
-                if (isSuccess) {
-                    await sock.sendMessage(senderNumber, { text: `Sip! Pengeluaran ${description} sebesar Rp${amount} berhasil dicatat.` }, { quoted: msg });
+                if (result.success) {
+                    await sock.sendMessage(senderNumber, { text: `Sip! Pengeluaran *${description}* sebesar *Rp${amount}* berhasil dicatat.\n\n💰 Total hari ini: *Rp${result.total}*` }, { quoted: msg });
                 } else {
-                    await sock.sendMessage(senderNumber, { text: 'Gagal mencatat ke database' }, { quoted: msg });
+                    await sock.sendMessage(senderNumber, { text: '❌ Gagal mencatat ke database' }, { quoted: msg });
                 }
             } catch (error) {
                 console.error('\n❌ Terjadi error sistem saat mencatat:', error);
-                // Return fallback message yang diminta dalam Try...Catch block
-                await sock.sendMessage(senderNumber, { text: 'Gagal mencatat ke database' }, { quoted: msg });
+                await sock.sendMessage(senderNumber, { text: '❌ Gagal mencatat ke database' }, { quoted: msg });
             }
         }
     });

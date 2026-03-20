@@ -39,32 +39,82 @@ const doc = new GoogleSpreadsheet(process.env.SPREADSHEET_ID, serviceAccountAuth
 
 /**
  * Fungsi untuk menambah data pengeluaran (append row) ke Google Sheets
- * Akan mengisi 3 kolom berurutan.
- * Kolom A: Tanggal & Waktu
- * Kolom B: Deskripsi
- * Kolom C: Nominal pengeluaran (angka murni)
- * 
- * @param {string} tanggal Tanggal atau waktu transaksi
- * @param {string} deskripsi Deskripsi / nama pengeluaran
- * @param {number} nominal Nominal angka tanpa titik koma
- * @returns {Promise<boolean>} Status berhasil/tidaknya
+ * dengan cara manual (koordinat cell) untuk menghindari bug "overwriting".
  */
 export async function catatPengeluaran(tanggal, deskripsi, nominal) {
     try {
-        // Meload properti awal dari dokumen sheet
         await doc.loadInfo(); 
-        
-        // Memilih Lembaran (Worksheet) ke-1 dari dokumen
         const sheet = doc.sheetsByIndex[0];
 
-        // Menyisipkan array langsung sebagai baris baru
-        // Elemen array akan otomatis masuk ke Kolom A, B, dan C
-        await sheet.addRow([tanggal, deskripsi, nominal]);
+        // Ambil baris yang sudah ada untuk menentukan baris kosong berikutnya
+        const rows = await sheet.getRows();
+        
+        // Baris 1: Header
+        // Baris 2 s/d (rows.length + 1) : Data existing
+        // Maka baris kosong berikutnya: rows.length + 2
+        const targetRowIndex = rows.length + 1; // getRows mengembalikan data row, indeks 0 di lib = Baris 2 di Sheet
 
-        console.log(`✅ [Google Sheets] Berhasil mencatat Rp ${nominal} untuk "${deskripsi}"`);
-        return true;
+        // Load 1 baris target tersebut saja agar efisien
+        // Baris di loadCells menggunakan index 0 (0 = Baris 1/Header, 1 = Baris 2, dst)
+        const nextBlankRowIndex = rows.length + 1;
+        await sheet.loadCells({
+            startRowIndex: nextBlankRowIndex,
+            endRowIndex: nextBlankRowIndex + 1,
+            startColumnIndex: 0,
+            endColumnIndex: 3
+        });
+
+        // Isi Cell secara manual ke Baris yang dituju
+        sheet.getCell(nextBlankRowIndex, 0).value = tanggal;
+        sheet.getCell(nextBlankRowIndex, 1).value = deskripsi;
+        sheet.getCell(nextBlankRowIndex, 2).value = Number(nominal);
+
+        await sheet.saveUpdatedCells();
+
+        // Hitung ulang total harian setelah update (menggunakan data fresh)
+        const updatedRows = await sheet.getRows();
+        const datePrefix = tanggal.split(' ')[0];
+        let totalHarian = 0;
+        
+        updatedRows.forEach(row => {
+            const rowDate = row._rawData[0];
+            if (rowDate && rowDate.startsWith(datePrefix)) {
+                const rawAmount = row._rawData[2] || '0';
+                const rowAmount = parseFloat(rawAmount.toString().replace(/[^\d]/g, ''));
+                if (!isNaN(rowAmount)) totalHarian += rowAmount;
+            }
+        });
+
+        return { success: true, total: totalHarian };
     } catch (error) {
-        console.error('❌ [Google Sheets] Gagal mencatat pengeluaran:', error);
-        return false;
+        console.error('❌ [Critical Error]:', error);
+        return { success: false, total: 0 };
     }
 }
+
+/**
+ * Mendapatkan daftar pengeluaran untuk hari ini.
+ */
+export async function getTodayData(tanggalSekarang) {
+    try {
+        await doc.loadInfo();
+        const sheet = doc.sheetsByIndex[0];
+        const rows = await sheet.getRows();
+        const datePrefix = tanggalSekarang.split(' ')[0];
+
+        const todayRows = rows.filter(row => {
+            const rowDate = row._rawData[0];
+            return rowDate && rowDate.startsWith(datePrefix);
+        });
+
+        return todayRows.map(row => ({
+            timestamp: row._rawData[0],
+            description: row._rawData[1],
+            amount: row._rawData[2],
+            originalRow: row
+        }));
+    } catch (error) {
+        return [];
+    }
+}
+
