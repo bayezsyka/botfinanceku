@@ -4,126 +4,171 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-/*
- * ==============================================================================
- * CARA MENDAPATKAN KREDENSIAL SERVICE ACCOUNT DARI GOOGLE CLOUD CONSOLE
- * ==============================================================================
- * 1. Buka Google Cloud Console (https://console.cloud.google.com/)
- * 2. Buat Project baru atau pilih Project yang sudah ada.
- * 3. Aktifkan "Google Sheets API" di menu "APIs & Services" > "Library".
- * 4. Buka menu "APIs & Services" > "Credentials".
- * 5. Klik "Create Credentials" > "Service account".
- * 6. Isi nama service account bebas, lalu klik "Done".
- * 7. Di daftar Service Account, klik email yang baru saja dibuat.
- * 8. Buka tab "Keys" > "Add Key" > "Create new key" > Pilih format "JSON".
- * 9. File JSON akan terunduh. Buka file tersebut dan copy nilai:
- *    - `client_email` paste ke variabel GOOGLE_SERVICE_ACCOUNT_EMAIL di .env
- *    - `private_key` paste ke variabel GOOGLE_PRIVATE_KEY di .env
- *    (Catatan: Pastikan copy private_key secara utuh termasuk tanda -----BEGIN PRIVATE KEY----- dsb)
- * 10. TERAKHIR SANGAT PENTING: Buka file target Google Sheets Anda di browser, 
- *     klik tombol "Bagikan" (Share) di pojok kanan atas, lalu tambahkan "client_email" 
- *     tadi sebagai "Editor".
- * ==============================================================================
- */
-
-// Konfigurasi Autentikasi menggunakan JWT dari google-auth-library
+// ============================================================================
+// AUTH & CONFIG
+// ============================================================================
 const serviceAccountAuth = new JWT({
     email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-    // Replace secara spesifik \n string menjadi enter asli, akibat pemrosesan .env
     key: (process.env.GOOGLE_PRIVATE_KEY || '').replace(/\\n/g, '\n'),
     scopes: ['https://www.googleapis.com/auth/spreadsheets'],
 });
 
-// Inisiasi Doc berdasarkan ID Spreadsheet (diambil dari URL Sheets Anda)
 const doc = new GoogleSpreadsheet(process.env.SPREADSHEET_ID, serviceAccountAuth);
 
-/**
- * Fungsi untuk mencatat pengeluaran dengan format Grouping per Hari + Merging & Coloring.
- */
-export async function catatPengeluaran(tanggalFull, deskripsi, nominal) {
-    try {
+// Cache sheet info agar tidak loadInfo berulang kali
+let _sheetReady = false;
+async function ensureSheetReady() {
+    if (!_sheetReady) {
         await doc.loadInfo();
-        const sheet = doc.sheetsByIndex[0];
+        _sheetReady = true;
+    }
+    return doc.sheetsByIndex[0];
+}
 
-        // Format Tanggal & Waktu
-        const dateObj = new Date();
-        const hariIndo = dateObj.toLocaleString('id-ID', { weekday: 'long', day: 'numeric', month: 'short', year: 'numeric' });
-        const waktuIndo = dateObj.toLocaleString('id-ID', { hour: '2-digit', minute: '2-digit', hour12: false }).replace(/:/g, '.');
+// ============================================================================
+// HELPER: Tanggal & Waktu WIB
+// ============================================================================
+function getWIBDate() {
+    const now = new Date();
+    // Format hari: "Sabtu, 21 Mar 2026"
+    const hariIndo = now.toLocaleString('id-ID', { 
+        timeZone: 'Asia/Jakarta', 
+        weekday: 'long', 
+        day: 'numeric', 
+        month: 'short', 
+        year: 'numeric' 
+    });
+    // Format waktu: "02.30"
+    const waktuIndo = now.toLocaleString('id-ID', { 
+        timeZone: 'Asia/Jakarta', 
+        hour: '2-digit', 
+        minute: '2-digit', 
+        hour12: false 
+    }).replace(/:/g, '.');
 
-        // Pastikan header sesuai
-        await sheet.loadHeaderRow().catch(() => {});
+    return { hariIndo, waktuIndo };
+}
+
+// Format rupiah: 15000 -> "15.000"
+function formatRupiah(num) {
+    return Number(num).toLocaleString('id-ID');
+}
+
+// ============================================================================
+// HEADER SETUP
+// ============================================================================
+const HEADERS = ['Hari', 'Waktu', 'Deskripsi', 'Nominal', 'Tipe'];
+
+async function ensureHeaders(sheet) {
+    try {
+        await sheet.loadHeaderRow();
         if (!sheet.headerValues || sheet.headerValues.length === 0 || sheet.headerValues[0] !== 'Hari') {
-            await sheet.setHeaderRow(['Hari', 'Waktu', 'Deskripsi', 'Nominal']);
+            await sheet.setHeaderRow(HEADERS);
         }
+        // Upgrade header lama (4 kolom) ke 5 kolom jika perlu
+        if (sheet.headerValues.length < 5 || sheet.headerValues[4] !== 'Tipe') {
+            await sheet.setHeaderRow(HEADERS);
+        }
+    } catch {
+        await sheet.setHeaderRow(HEADERS);
+    }
+}
 
-        const rows = await sheet.getRows();
-        let totalRowIndex = -1;
-        let blockStartIndex = -1; // Row Index (0-based di array rows)
-        let isTodayBlock = false;
+// ============================================================================
+// CARI BLOK HARI INI
+// ============================================================================
+function findTodayBlock(rows, hariIndo) {
+    let totalRowIndex = -1;
+    let blockStartIndex = -1;
+    let isTodayBlock = false;
 
-        // Cari blok hari ini
-        for (let i = rows.length - 1; i >= 0; i--) {
-            if (rows[i]._rawData[0] === 'Total') {
-                totalRowIndex = i;
-                // Cari awal blok (baris yang punya isi di kolom Hari selain "Total")
-                for (let j = i; j >= 0; j--) {
-                    const rowHari = rows[j]._rawData[0];
-                    if (rowHari && rowHari !== 'Total') {
-                        blockStartIndex = j;
-                        if (rowHari === hariIndo) isTodayBlock = true;
-                        break;
-                    }
+    // Scan dari bawah ke atas, cari blok terakhir yang punya Total
+    for (let i = rows.length - 1; i >= 0; i--) {
+        const cellHari = rows[i]._rawData[0];
+        if (cellHari === 'Total') {
+            totalRowIndex = i;
+            // Mundur lagi untuk cari label hari
+            for (let j = i - 1; j >= 0; j--) {
+                const rowHari = rows[j]._rawData[0];
+                if (rowHari && rowHari !== 'Total' && rowHari !== '') {
+                    blockStartIndex = j;
+                    if (rowHari === hariIndo) isTodayBlock = true;
+                    break;
                 }
-                break;
             }
+            break;
         }
+    }
+
+    return { totalRowIndex, blockStartIndex, isTodayBlock };
+}
+
+// ============================================================================
+// CATAT PENGELUARAN / PEMASUKAN
+// ============================================================================
+export async function catatTransaksi(deskripsi, nominal, tipe = 'pengeluaran') {
+    try {
+        const sheet = await ensureSheetReady();
+        await ensureHeaders(sheet);
+
+        const { hariIndo, waktuIndo } = getWIBDate();
+        const rows = await sheet.getRows();
+        const { totalRowIndex, blockStartIndex, isTodayBlock } = findTodayBlock(rows, hariIndo);
 
         if (totalRowIndex !== -1 && isTodayBlock) {
-            // JIKA SUDAH ADA BLOK HARI INI
-            const totalRowSheetIdx = totalRowIndex + 2; // Baris di sheet (1-based + header)
-            
-            // 1. Sisipkan baris di atas Total
-            await sheet.insertDimension('ROWS', { 
-                startIndex: totalRowSheetIdx - 1, 
-                endIndex: totalRowSheetIdx 
+            // ============================================================
+            // HARI INI SUDAH ADA BLOK — Sisipkan baris di atas Total
+            // ============================================================
+            const totalRowSheetIdx = totalRowIndex + 2; // +1 header, +1 karena 0-based
+
+            // 1. Sisipkan baris kosong di atas Total
+            await sheet.insertDimension('ROWS', {
+                startIndex: totalRowSheetIdx - 1,
+                endIndex: totalRowSheetIdx
             });
 
-            // 2. Isi data & Update Total
+            // 2. Muat cell area baris baru + Total
             await sheet.loadCells({
                 startRowIndex: totalRowSheetIdx - 1,
                 endRowIndex: totalRowSheetIdx + 1,
                 startColumnIndex: 0,
-                endColumnIndex: 4
+                endColumnIndex: 5
             });
 
-            // Baris baru (Tanpa teks Hari agar bisa di-merge vertical nanti)
+            // 3. Isi baris baru
             sheet.getCell(totalRowSheetIdx - 1, 1).value = waktuIndo;
             sheet.getCell(totalRowSheetIdx - 1, 2).value = deskripsi;
             sheet.getCell(totalRowSheetIdx - 1, 3).value = Number(nominal);
+            sheet.getCell(totalRowSheetIdx - 1, 4).value = tipe === 'pemasukan' ? '💰 Masuk' : '💸 Keluar';
 
-            // Update Nominal Total
+            // 4. Update Nominal Total
             const totalCell = sheet.getCell(totalRowSheetIdx, 3);
             const currentTotal = parseFloat(totalCell.value || 0);
-            const newTotal = currentTotal + Number(nominal);
+            const delta = tipe === 'pemasukan' ? Number(nominal) : -Number(nominal);
+            const newTotal = currentTotal + delta;
             totalCell.value = newTotal;
 
             await sheet.saveUpdatedCells();
 
-            // 3. RE-MERGE Hari (Vertical)
-            // Range: Dari blockStartIndex sampai baris sebelum Total
-            // Index Sheet: (blockStartIndex + 2) s/d (totalRowSheetIdx)
-            await sheet.mergeCells({
-                startRowIndex: blockStartIndex + 1, // +1 (header)
-                endRowIndex: totalRowSheetIdx,      // Sampai baris baru yang disisipkan
-                startColumnIndex: 0,
-                endColumnIndex: 1
-            });
+            // 5. Re-merge kolom Hari (vertical)
+            try {
+                await sheet.mergeCells({
+                    startRowIndex: blockStartIndex + 1,
+                    endRowIndex: totalRowSheetIdx,
+                    startColumnIndex: 0,
+                    endColumnIndex: 1,
+                }, 'MERGE_ALL');
+            } catch (mergeErr) {
+                console.warn('⚠️ Merge hari gagal (mungkin overlap):', mergeErr.message);
+            }
 
             return { success: true, total: newTotal };
 
         } else {
-            // JIKA BLOK BARU
-            const startLoadIdx = rows.length + 1; // Index 0-based di library cells (Indeks baris berikutnya)
+            // ============================================================
+            // BLOK BARU UNTUK HARI INI
+            // ============================================================
+            const startLoadIdx = rows.length + 1;
             const spacerOffset = (rows.length > 0) ? 1 : 0;
             const dataRowIdx = startLoadIdx + spacerOffset;
             const totalRowIdx = dataRowIdx + 1;
@@ -132,7 +177,7 @@ export async function catatPengeluaran(tanggalFull, deskripsi, nominal) {
                 startRowIndex: startLoadIdx,
                 endRowIndex: totalRowIdx + 1,
                 startColumnIndex: 0,
-                endColumnIndex: 4
+                endColumnIndex: 5
             });
 
             // Baris Data
@@ -140,77 +185,335 @@ export async function catatPengeluaran(tanggalFull, deskripsi, nominal) {
             cellHari.value = hariIndo;
             cellHari.verticalAlignment = 'MIDDLE';
             cellHari.horizontalAlignment = 'CENTER';
-            
+            cellHari.textFormat = { bold: true };
+
             sheet.getCell(dataRowIdx, 1).value = waktuIndo;
             sheet.getCell(dataRowIdx, 2).value = deskripsi;
             sheet.getCell(dataRowIdx, 3).value = Number(nominal);
+            sheet.getCell(dataRowIdx, 4).value = tipe === 'pemasukan' ? '💰 Masuk' : '💸 Keluar';
 
             // Baris Total
             const cellTotalDesc = sheet.getCell(totalRowIdx, 0);
             cellTotalDesc.value = 'Total';
-            
-            const cellTotalVal = sheet.getCell(totalRowIdx, 3);
-            cellTotalVal.value = Number(nominal);
 
-            // Warna Background Abu-abu Muda & Bold untuk Baris Total
-            for (let c = 0; c < 4; c++) {
+            const initialTotal = tipe === 'pemasukan' ? Number(nominal) : -Number(nominal);
+            const cellTotalVal = sheet.getCell(totalRowIdx, 3);
+            cellTotalVal.value = initialTotal;
+
+            // Styling Total row
+            for (let c = 0; c < 5; c++) {
                 const cell = sheet.getCell(totalRowIdx, c);
-                cell.backgroundColor = { red: 0.95, green: 0.95, blue: 0.95 };
+                cell.backgroundColor = { red: 0.93, green: 0.93, blue: 0.93 };
                 cell.textFormat = { bold: true };
             }
 
             await sheet.saveUpdatedCells();
 
-            // Merge Horizontal untuk kata "Total" (Col A s/d C)
-            await sheet.mergeCells({
-                startRowIndex: totalRowIdx,
-                endRowIndex: totalRowIdx + 1,
-                startColumnIndex: 0,
-                endColumnIndex: 3
-            });
+            // Merge horizontal "Total" (Col A-C)
+            try {
+                await sheet.mergeCells({
+                    startRowIndex: totalRowIdx,
+                    endRowIndex: totalRowIdx + 1,
+                    startColumnIndex: 0,
+                    endColumnIndex: 3,
+                }, 'MERGE_ALL');
+            } catch (mergeErr) {
+                console.warn('⚠️ Merge total gagal:', mergeErr.message);
+            }
 
-            return { success: true, total: nominal };
+            return { success: true, total: initialTotal };
         }
     } catch (error) {
-        console.error('❌ [Merge/Color Error]:', error);
+        console.error('❌ [catatTransaksi Error]:', error.message || error);
         return { success: false, total: 0 };
     }
 }
 
+// Wrapper sederhana
+export async function catatPengeluaran(tanggalFull, deskripsi, nominal) {
+    return catatTransaksi(deskripsi, nominal, 'pengeluaran');
+}
 
-/**
- * Mendapatkan daftar pengeluaran untuk hari ini.
- */
-export async function getTodayData(tanggalSekarang) {
+export async function catatPemasukan(deskripsi, nominal) {
+    return catatTransaksi(deskripsi, nominal, 'pemasukan');
+}
+
+// ============================================================================
+// GET DATA HARI INI (untuk fitur hapus & rangkuman)
+// ============================================================================
+export async function getTodayData() {
     try {
-        await doc.loadInfo();
-        const sheet = doc.sheetsByIndex[0];
+        const sheet = await ensureSheetReady();
+        await ensureHeaders(sheet);
         const rows = await sheet.getRows();
-        
-        const dateObj = new Date();
-        const hariIndo = dateObj.toLocaleString('id-ID', { weekday: 'long', day: 'numeric', month: 'short', year: 'numeric' });
+        const { hariIndo } = getWIBDate();
 
-        // Temukan blok hari ini
         let inTodayBlock = false;
         const todayItems = [];
 
-        for (const row of rows) {
-            const hariCell = row._rawData[0];
-            if (hariCell === hariIndo) inTodayBlock = true;
-            else if (hariCell && hariCell !== hariIndo) inTodayBlock = false;
+        for (let i = 0; i < rows.length; i++) {
+            const hariCell = rows[i]._rawData[0];
 
-            if (inTodayBlock && row._rawData[0] !== 'Total') {
-                todayItems.push({
-                    timestamp: row._rawData[1],
-                    description: row._rawData[2],
-                    amount: row._rawData[3],
-                    originalRow: row
-                });
+            // Deteksi awal blok hari ini
+            if (hariCell === hariIndo) {
+                inTodayBlock = true;
+            } else if (hariCell && hariCell !== '' && hariCell !== hariIndo && hariCell !== 'Total') {
+                // Beda hari -> keluar dari blok
+                inTodayBlock = false;
+            }
+
+            // Skip baris Total
+            if (hariCell === 'Total') {
+                if (inTodayBlock) break; // Sudah selesai blok hari ini
+                continue;
+            }
+
+            if (inTodayBlock) {
+                const waktu = rows[i]._rawData[1] || '';
+                const desc = rows[i]._rawData[2] || '';
+                const amt = rows[i]._rawData[3] || '0';
+                const tipe = rows[i]._rawData[4] || '💸 Keluar';
+
+                if (desc) {
+                    todayItems.push({
+                        waktu,
+                        description: desc,
+                        amount: amt,
+                        tipe,
+                        rowIndex: i, // Index di array rows (0-based)
+                        sheetRowIndex: i + 2, // Baris di sheet (1-based + header)
+                    });
+                }
             }
         }
         return todayItems;
     } catch (error) {
+        console.error('❌ [getTodayData Error]:', error.message || error);
         return [];
     }
 }
 
+// ============================================================================
+// HAPUS ITEM — Menggunakan batchUpdate deleteRange (lebih reliable)
+// ============================================================================
+export async function hapusItems(itemsToDelete) {
+    try {
+        // Reload setiap kali agar indeks terkini
+        _sheetReady = false;
+        const sheet = await ensureSheetReady();
+        await ensureHeaders(sheet);
+        const rows = await sheet.getRows();
+        const { hariIndo } = getWIBDate();
+
+        // Kumpulkan sheet row indices yang perlu dihapus
+        const sheetRowIndices = itemsToDelete.map(item => item.sheetRowIndex);
+
+        // SANGAT PENTING: Urutkan dari bawah ke atas agar tidak menggeser indeks
+        sheetRowIndices.sort((a, b) => b - a);
+
+        const deletedNames = itemsToDelete.map(item => item.description);
+
+        // Hapus satu per satu dari bawah ke atas
+        for (const sheetIdx of sheetRowIndices) {
+            await sheet.spreadsheet.batchUpdate({
+                requests: [{
+                    deleteDimension: {
+                        range: {
+                            sheetId: sheet.sheetId,
+                            dimension: 'ROWS',
+                            startIndex: sheetIdx - 1, // API uses 0-based
+                            endIndex: sheetIdx
+                        }
+                    }
+                }]
+            });
+        }
+
+        // Sekarang recalculate total hari ini
+        // Perlu reload lagi setelah delete
+        _sheetReady = false;
+        const sheet2 = await ensureSheetReady();
+        const rows2 = await sheet2.getRows();
+        const { totalRowIndex, blockStartIndex, isTodayBlock } = findTodayBlock(rows2, hariIndo);
+
+        if (totalRowIndex !== -1 && isTodayBlock) {
+            // Hitung ulang total
+            let newTotal = 0;
+            for (let i = blockStartIndex; i < totalRowIndex; i++) {
+                const amt = parseFloat(rows2[i]._rawData[3] || 0);
+                const tipe = rows2[i]._rawData[4] || '💸 Keluar';
+                if (tipe.includes('Masuk')) {
+                    newTotal += amt;
+                } else {
+                    newTotal -= amt;
+                }
+            }
+
+            // Update total cell
+            const totalSheetIdx = totalRowIndex + 2;
+            await sheet2.loadCells({
+                startRowIndex: totalSheetIdx - 1,
+                endRowIndex: totalSheetIdx,
+                startColumnIndex: 3,
+                endColumnIndex: 4
+            });
+            const totalCell = sheet2.getCell(totalSheetIdx - 1, 3);
+            totalCell.value = newTotal;
+            await sheet2.saveUpdatedCells();
+
+            // Cek apakah blok masih punya item data (selain Total)
+            const dataRowCount = totalRowIndex - blockStartIndex;
+            if (dataRowCount <= 0) {
+                // Blok sudah kosong, hapus Total row juga
+                await sheet2.spreadsheet.batchUpdate({
+                    requests: [{
+                        deleteDimension: {
+                            range: {
+                                sheetId: sheet2.sheetId,
+                                dimension: 'ROWS',
+                                startIndex: totalSheetIdx - 1,
+                                endIndex: totalSheetIdx
+                            }
+                        }
+                    }]
+                });
+            } else {
+                // Re-merge kolom Hari (vertical) jika masih ada data
+                try {
+                    // Unmerge dulu supaya tidak error overlap
+                    await sheet2.spreadsheet.batchUpdate({
+                        requests: [{
+                            unmergeCells: {
+                                range: {
+                                    sheetId: sheet2.sheetId,
+                                    startRowIndex: blockStartIndex + 1,
+                                    endRowIndex: totalSheetIdx,
+                                    startColumnIndex: 0,
+                                    endColumnIndex: 1
+                                }
+                            }
+                        }]
+                    });
+                } catch { /* ignore if nothing to unmerge */ }
+
+                if (dataRowCount > 1) {
+                    try {
+                        await sheet2.mergeCells({
+                            startRowIndex: blockStartIndex + 1,
+                            endRowIndex: totalSheetIdx - 1,
+                            startColumnIndex: 0,
+                            endColumnIndex: 1,
+                        }, 'MERGE_ALL');
+                    } catch { /* ignore merge errors */ }
+                }
+            }
+        }
+
+        return { success: true, deletedNames };
+    } catch (error) {
+        console.error('❌ [hapusItems Error]:', error.message || error);
+        return { success: false, deletedNames: [] };
+    }
+}
+
+// ============================================================================
+// RANGKUMAN HARI INI
+// ============================================================================
+export async function getRangkumanHariIni() {
+    const items = await getTodayData();
+    if (items.length === 0) return null;
+
+    let totalMasuk = 0;
+    let totalKeluar = 0;
+    const details = [];
+
+    items.forEach(item => {
+        const amt = parseFloat(item.amount || 0);
+        const isMasuk = (item.tipe || '').includes('Masuk');
+        if (isMasuk) {
+            totalMasuk += amt;
+        } else {
+            totalKeluar += amt;
+        }
+        details.push({
+            waktu: item.waktu,
+            desc: item.description,
+            amount: amt,
+            tipe: isMasuk ? 'masuk' : 'keluar',
+        });
+    });
+
+    return {
+        items: details,
+        totalMasuk,
+        totalKeluar,
+        saldo: totalMasuk - totalKeluar,
+    };
+}
+
+// ============================================================================
+// RANGKUMAN BULAN INI
+// ============================================================================
+export async function getRangkumanBulanIni() {
+    try {
+        const sheet = await ensureSheetReady();
+        await ensureHeaders(sheet);
+        const rows = await sheet.getRows();
+
+        // Dapatkan bulan+tahun sekarang dalam format Indonesia
+        const now = new Date();
+        const bulanTahunNow = now.toLocaleString('id-ID', { 
+            timeZone: 'Asia/Jakarta', 
+            month: 'short', 
+            year: 'numeric' 
+        }); // e.g. "Mar 2026"
+
+        let totalMasuk = 0;
+        let totalKeluar = 0;
+        let hariCount = 0;
+        let currentDay = '';
+
+        for (const row of rows) {
+            const hariCell = row._rawData[0] || '';
+            const desc = row._rawData[2] || '';
+            const amt = parseFloat(row._rawData[3] || 0);
+            const tipe = row._rawData[4] || '💸 Keluar';
+
+            // Deteksi header hari yang mengandung bulan+tahun ini
+            if (hariCell && hariCell !== 'Total' && hariCell !== '' && hariCell.includes(bulanTahunNow)) {
+                currentDay = hariCell;
+                hariCount++;
+            }
+
+            // Skip Total rows dan baris kosong
+            if (hariCell === 'Total' || !desc) continue;
+
+            // Hanya hitung jika dalam bulan ini
+            if (currentDay.includes(bulanTahunNow)) {
+                if (tipe.includes('Masuk')) {
+                    totalMasuk += amt;
+                } else {
+                    totalKeluar += amt;
+                }
+            }
+        }
+
+        return {
+            bulan: bulanTahunNow,
+            totalMasuk,
+            totalKeluar,
+            saldo: totalMasuk - totalKeluar,
+            jumlahHari: hariCount,
+        };
+    } catch (error) {
+        console.error('❌ [getRangkumanBulanIni Error]:', error.message || error);
+        return null;
+    }
+}
+
+// ============================================================================
+// INVALIDATE CACHE (dipanggil setelah operasi tulis)
+// ============================================================================
+export function invalidateCache() {
+    _sheetReady = false;
+}

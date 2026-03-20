@@ -4,39 +4,92 @@ import pino from 'pino';
 import dotenv from 'dotenv';
 import qrcode from 'qrcode-terminal';
 import { parseExpenseMessage } from './parser.js';
-import { catatPengeluaran, getTodayData } from './sheets.js';
+import {
+    catatTransaksi,
+    getTodayData,
+    hapusItems,
+    getRangkumanHariIni,
+    getRangkumanBulanIni,
+    invalidateCache,
+} from './sheets.js';
 
-// Variabel Session Store (Sederhana untuk handle reply hapus)
-let deleteSession = {};
-
-// Load environment variables dari .env file
 dotenv.config();
 
 const OWNER_NUMBER = '6287721031021@s.whatsapp.net';
-const BOT_NUMBER = '6285161603362'; // Nomor yang digunakan bot
+const BOT_NUMBER = '6285161603362';
 
+// Session store untuk fitur hapus (per sender)
+const deleteSession = {};
+
+// ============================================================================
+// FORMAT HELPERS
+// ============================================================================
+function formatRupiah(num) {
+    const abs = Math.abs(Number(num));
+    const formatted = abs.toLocaleString('id-ID');
+    return Number(num) < 0 ? `-Rp${formatted}` : `Rp${formatted}`;
+}
+
+// ============================================================================
+// MENU BANTUAN
+// ============================================================================
+function getHelpMessage() {
+    return `╔══════════════════════════╗
+║   💰 *BOT FINANCE ASSISTANT*   ║
+╚══════════════════════════╝
+
+📌 *PERINTAH YANG TERSEDIA:*
+
+━━━ 💸 *Catat Pengeluaran* ━━━
+Ketik: *[deskripsi] [nominal]*
+Contoh:
+• kopi 15k
+• makan siang 25000
+• bensin 50rb
+• belanja bulanan 1.5jt
+
+━━━ 💰 *Catat Pemasukan* ━━━
+Ketik: *+[deskripsi] [nominal]*
+atau: *masuk [deskripsi] [nominal]*
+Contoh:
+• +gaji 5jt
+• +freelance 500k
+• masuk transfer 1.5jt
+
+━━━ 📊 *Lihat Rangkuman* ━━━
+• *rangkuman* — Rangkuman hari ini
+• *bulan ini* — Rangkuman bulan ini
+
+━━━ 🗑️ *Hapus Data* ━━━
+• *hapus hari ini* — Pilih item untuk dihapus
+• Lalu ketik hurufnya (a, b, abc, a,b,c)
+
+━━━ ℹ️ *Lainnya* ━━━
+• *ping* — Cek apakah bot aktif
+• *menu* atau *help* — Tampilkan menu ini
+
+💡 _Suffix angka: k/rb = ribu, jt = juta_`;
+}
+
+// ============================================================================
+// KONEKSI WHATSAPP
+// ============================================================================
 async function connectToWhatsApp() {
-    // Session akan disimpan di folder auth_info_baileys
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
-
-    // Ambil versi WA Web terbaru untuk mencegah bug 405
     const { version } = await fetchLatestBaileysVersion();
 
     const sock = makeWASocket({
         version,
         auth: state,
-        logger: pino({ level: 'silent' }), // Menyembunyikan log yang tidak penting
-        browser: Browsers.macOS('Desktop') // Identitas default agar tidak diblokir WA
+        logger: pino({ level: 'silent' }),
+        browser: Browsers.macOS('Desktop')
     });
 
-    // Event ketika state kredensial berubah (sukses login, dsb.)
     sock.ev.on('creds.update', saveCreds);
 
-    // Event deteksi jika koneksi berubah (tersambung, putus)
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect, qr } = update;
-        
-        // Render QR Code manual jika tersedia
+
         if (qr) {
             qrcode.generate(qr, { small: true });
             console.log('\n☝️ Scan QR Code di atas menggunakan WhatsApp Anda!');
@@ -46,145 +99,229 @@ async function connectToWhatsApp() {
             const reason = lastDisconnect?.error?.output?.statusCode;
             const shouldReconnect = reason !== DisconnectReason.loggedOut;
             console.log('Koneksi terputus. Kode alasan:', reason, '| Reconnecting:', shouldReconnect);
-            
-            // Reconnect jika errornya bukan karena logout dari perangkat
+
             if (shouldReconnect) {
-                setTimeout(connectToWhatsApp, 3000); // Beri jeda 3 detik agar tidak spam loop
+                setTimeout(connectToWhatsApp, 3000);
             }
         } else if (connection === 'open') {
-            console.log('✅ Koneksi WhatsApp berhasil terhubung!');
+            console.log('✅ Bot Finance Assistant terhubung ke WhatsApp!');
         }
     });
 
-    // Event pendeteksi pesan masuk
+    // ============================================================================
+    // MESSAGE HANDLER
+    // ============================================================================
     sock.ev.on('messages.upsert', async (m) => {
         const msg = m.messages[0];
-        
-        // 1. Abaikan pesan kosong atau pesan dari bot itu sendiri
+
+        // Abaikan pesan kosong atau dari bot sendiri
         if (!msg.message || msg.key.fromMe) return;
 
         const senderNumber = msg.key.remoteJid;
 
-        // 2. Filter utama: HANYA proses dan balas jika pengirim adalah owner
-        if (senderNumber !== OWNER_NUMBER) {
-            // Jika bukan dari owner, abaikan (bisa masuk dari grup atau nomor orang lain)
-            return;
-        }
+        // Filter: HANYA proses dari owner
+        if (senderNumber !== OWNER_NUMBER) return;
 
-        // Ambil isi pesannya
         const textMessage = msg.message.conversation || msg.message.extendedTextMessage?.text;
+        if (!textMessage) return;
 
-        if (textMessage) {
-            console.log(`\n[💌 Pesan Baru] Dari Owner: ${textMessage}`);
+        const text = textMessage.trim();
+        const textLower = text.toLowerCase();
 
-            // Cek sapaan sederhana untuk mengetes bot sudah responsif
-            if (textMessage.toLowerCase() === 'ping') {
-                await sock.sendMessage(senderNumber, { text: 'Pong! Bot finance Anda siap digunakan bosku. 📊' }, { quoted: msg });
+        console.log(`\n[💌 Pesan Baru] Dari Owner: ${text}`);
+
+        // Reply helper
+        const reply = async (content) => {
+            await sock.sendMessage(senderNumber, { text: content }, { quoted: msg });
+        };
+
+        try {
+            // ==============================================================
+            // COMMAND: ping
+            // ==============================================================
+            if (textLower === 'ping') {
+                await reply('🏓 Pong! Bot Finance Assistant siap digunakan!');
                 return;
             }
 
-            // Fitur Hapus Pengeluaran Hari Ini
-            if (textMessage.toLowerCase() === 'hapus hari ini') {
-                try {
-                    const todayDate = new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta', year: 'numeric', month: '2-digit', day: '2-digit' }).replace(/\./g, ':');
-                    const items = await getTodayData(todayDate);
-
-                    if (items.length === 0) {
-                        await sock.sendMessage(senderNumber, { text: 'Belum ada pengeluaran hari ini yang bisa dihapus.' }, { quoted: msg });
-                        return;
-                    }
-
-                    let listMsg = '📊 *Daftar Pengeluaran Hari Ini:*\n\n';
-                    deleteSession[senderNumber] = {}; // Reset session pengirim
-
-                    items.forEach((item, index) => {
-                        const letter = String.fromCharCode(97 + index); // a, b, c, ...
-                        deleteSession[senderNumber][letter] = item.originalRow; // Simpan row mapping
-                        listMsg += `*${letter}.* ${item.description} - Rp${item.amount}\n`;
-                    });
-
-                    listMsg += '\nKetik hurufnya (misal: *a*) untuk menghapus.';
-                    await sock.sendMessage(senderNumber, { text: listMsg }, { quoted: msg });
-                    return;
-                } catch (err) {
-                    console.error('Error list hapus:', err);
-                    await sock.sendMessage(senderNumber, { text: 'Gagal mengambil data hapus.' }, { quoted: msg });
-                    return;
-                }
+            // ==============================================================
+            // COMMAND: menu / help
+            // ==============================================================
+            if (textLower === 'menu' || textLower === 'help' || textLower === 'bantuan') {
+                await reply(getHelpMessage());
+                return;
             }
 
-            // Handle Input Huruf untuk Hapus (bisa satu huruf 'a' atau banyak 'abc' / 'a,b,c')
+            // ==============================================================
+            // COMMAND: rangkuman (hari ini)
+            // ==============================================================
+            if (textLower === 'rangkuman' || textLower === 'hari ini' || textLower === 'summary') {
+                const data = await getRangkumanHariIni();
+                if (!data) {
+                    await reply('📭 Belum ada transaksi hari ini.');
+                    return;
+                }
+
+                let msg = '📊 *RANGKUMAN HARI INI*\n\n';
+
+                data.items.forEach((item, idx) => {
+                    const icon = item.tipe === 'masuk' ? '💰' : '💸';
+                    msg += `${icon} ${item.waktu} — ${item.desc}: *${formatRupiah(item.amount)}*\n`;
+                });
+
+                msg += `\n━━━━━━━━━━━━━━━━━━━━━━`;
+                if (data.totalMasuk > 0) msg += `\n💰 Total Masuk  : *${formatRupiah(data.totalMasuk)}*`;
+                if (data.totalKeluar > 0) msg += `\n💸 Total Keluar : *${formatRupiah(data.totalKeluar)}*`;
+                msg += `\n📌 *Saldo Hari Ini : ${formatRupiah(data.saldo)}*`;
+
+                await reply(msg);
+                return;
+            }
+
+            // ==============================================================
+            // COMMAND: bulan ini
+            // ==============================================================
+            if (textLower === 'bulan ini' || textLower === 'monthly' || textLower === 'bulanan') {
+                const data = await getRangkumanBulanIni();
+                if (!data) {
+                    await reply('📭 Belum ada data bulan ini.');
+                    return;
+                }
+
+                let msg = `📅 *RANGKUMAN BULAN ${data.bulan.toUpperCase()}*\n\n`;
+                msg += `📆 Jumlah hari tercatat : *${data.jumlahHari} hari*\n`;
+                if (data.totalMasuk > 0) msg += `💰 Total Pemasukan     : *${formatRupiah(data.totalMasuk)}*\n`;
+                msg += `💸 Total Pengeluaran   : *${formatRupiah(data.totalKeluar)}*\n`;
+                msg += `\n━━━━━━━━━━━━━━━━━━━━━━`;
+                msg += `\n📌 *Saldo Bulan Ini : ${formatRupiah(data.saldo)}*`;
+
+                if (data.jumlahHari > 0) {
+                    const avgPerHari = Math.round(data.totalKeluar / data.jumlahHari);
+                    msg += `\n📉 Rata-rata pengeluaran/hari : *${formatRupiah(avgPerHari)}*`;
+                }
+
+                await reply(msg);
+                return;
+            }
+
+            // ==============================================================
+            // COMMAND: hapus hari ini
+            // ==============================================================
+            if (textLower === 'hapus hari ini') {
+                invalidateCache();
+                const items = await getTodayData();
+
+                if (items.length === 0) {
+                    await reply('📭 Belum ada transaksi hari ini yang bisa dihapus.');
+                    return;
+                }
+
+                let listMsg = '🗑️ *Pilih item yang mau dihapus:*\n\n';
+                deleteSession[senderNumber] = {};
+
+                items.forEach((item, index) => {
+                    const letter = String.fromCharCode(97 + index); // a, b, c, ...
+                    deleteSession[senderNumber][letter] = item;
+                    const icon = (item.tipe || '').includes('Masuk') ? '💰' : '💸';
+                    listMsg += `*${letter}.* ${icon} ${item.description} — ${formatRupiah(item.amount)}\n`;
+                });
+
+                listMsg += '\n✏️ Ketik hurufnya untuk menghapus.';
+                listMsg += '\nContoh: *a* atau *a,b,c* atau *abc*';
+                listMsg += '\nKetik *batal* untuk membatalkan.';
+                await reply(listMsg);
+                return;
+            }
+
+            // ==============================================================
+            // HANDLE: Batal hapus
+            // ==============================================================
+            if (textLower === 'batal' && deleteSession[senderNumber]) {
+                delete deleteSession[senderNumber];
+                await reply('✅ Proses hapus dibatalkan.');
+                return;
+            }
+
+            // ==============================================================
+            // HANDLE: Input huruf untuk hapus (a, abc, a,b,c)
+            // ==============================================================
             const session = deleteSession[senderNumber];
-            if (session && textMessage.length >= 1 && textMessage.length <= 50) {
-                // Bersihkan input agar hanya tersisa huruf a-z (misal "a,b,c" -> "abc")
-                const selectedLetters = textMessage.toLowerCase().replace(/[^a-z]/g, '').split('');
-                
-                // Pastikan semua karakter yang diinput ada di session (validasi)
-                const rowsToDelete = [];
-                const deletedNames = [];
-                
-                selectedLetters.forEach(letter => {
+            if (session && Object.keys(session).length > 0 && text.length >= 1 && text.length <= 50) {
+                // Bersihkan input: "a,b,c" -> ['a','b','c'], "abc" -> ['a','b','c']
+                const selectedLetters = textLower.replace(/[^a-z]/g, '').split('');
+                const uniqueLetters = [...new Set(selectedLetters)]; // Deduplicate
+
+                const itemsToDelete = [];
+                const invalidLetters = [];
+
+                uniqueLetters.forEach(letter => {
                     if (session[letter]) {
-                        rowsToDelete.push(session[letter]);
-                        deletedNames.push(session[letter]._rawData[1]); // Ambil deskripsi
+                        itemsToDelete.push(session[letter]);
+                    } else {
+                        invalidLetters.push(letter);
                     }
                 });
 
-                if (rowsToDelete.length > 0) {
-                    try {
-                        // SANGAT PENTING: Urutkan dari baris paling bawah (Row Number paling besar) ke atas
-                        // agar penggeseran baris tidak merusak indeks baris yang akan dihapus berikutnya.
-                        rowsToDelete.sort((a, b) => (b._rowNumber || 0) - (a._rowNumber || 0));
+                if (invalidLetters.length > 0 && itemsToDelete.length === 0) {
+                    // Semua huruf tidak valid — mungkin ini bukan input hapus
+                    // Jangan block, lanjut ke parser biasa
+                } else if (itemsToDelete.length > 0) {
+                    // Konfirmasi dan hapus
+                    const result = await hapusItems(itemsToDelete);
 
-                        for (const row of rowsToDelete) {
-                            await row.delete();
-                        }
+                    delete deleteSession[senderNumber];
 
-                        delete deleteSession[senderNumber]; // Hapus session jika sudah selesai
-                        const confirmMsg = rowsToDelete.length > 1 
-                            ? `✅ Berhasil menghapus ${rowsToDelete.length} item: *${deletedNames.join(', ')}*`
-                            : `✅ Berhasil menghapus *${deletedNames[0]}* dari catatan hari ini.`;
-                        
-                        await sock.sendMessage(senderNumber, { text: confirmMsg }, { quoted: msg });
-                        return;
-                    } catch (err) {
-                        console.error('Error batch delete:', err);
-                        await sock.sendMessage(senderNumber, { text: 'Gagal menghapus beberapa data.' }, { quoted: msg });
-                        return;
+                    if (result.success) {
+                        const confirmMsg = itemsToDelete.length > 1
+                            ? `✅ Berhasil menghapus ${itemsToDelete.length} item:\n• ${result.deletedNames.join('\n• ')}`
+                            : `✅ Berhasil menghapus *${result.deletedNames[0]}* dari catatan hari ini.`;
+                        await reply(confirmMsg);
+                    } else {
+                        await reply('❌ Gagal menghapus data. Coba lagi nanti.');
                     }
+                    return;
                 }
             }
 
-            // Parsing pengeluaran (Input Manual)
-            const parsedData = parseExpenseMessage(textMessage);
+            // ==============================================================
+            // PARSE: Catat transaksi (pengeluaran / pemasukan)
+            // ==============================================================
+            const parsedData = parseExpenseMessage(text);
 
             if (!parsedData) {
-                // Jangan bales kalau cuma ngetik random (abaikan pesan pendek non-format)
-                if (textMessage.split(' ').length > 1) {
-                    await sock.sendMessage(senderNumber, { text: 'Format salah bos! Ketik dengan format: [deskripsi] [nominal/k/rb]' }, { quoted: msg });
+                // Abaikan pesan pendek random yang bukan command
+                // Balesi hanya jika terlihat seperti percobaan input (ada spasi)
+                if (text.split(' ').length > 1) {
+                    await reply(
+                        `❌ Format tidak dikenali.\n\n` +
+                        `💡 *Contoh pengeluaran:* kopi 15k\n` +
+                        `💡 *Contoh pemasukan:* +gaji 5jt\n\n` +
+                        `Ketik *menu* untuk melihat semua perintah.`
+                    );
                 }
                 return;
             }
 
-            try {
-                // Mendapatkan tanggal & waktu lengkap dengan timezone WIB
-                const dateOptions = { timeZone: 'Asia/Jakarta', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' };
-                const tanggalSekarang = new Date().toLocaleString('id-ID', dateOptions).replace(/\./g, ':');
-                
-                const { description, amount } = parsedData;
+            // Catat ke Google Sheets
+            invalidateCache();
+            const { description, amount, tipe } = parsedData;
+            const result = await catatTransaksi(description, amount, tipe);
 
-                // Jalankan record transaksi ke Google Sheets
-                const result = await catatPengeluaran(tanggalSekarang, description, amount);
-
-                if (result.success) {
-                    await sock.sendMessage(senderNumber, { text: `Sip! Pengeluaran *${description}* sebesar *Rp${amount}* berhasil dicatat.\n\n💰 Total hari ini: *Rp${result.total}*` }, { quoted: msg });
-                } else {
-                    await sock.sendMessage(senderNumber, { text: '❌ Gagal mencatat ke database' }, { quoted: msg });
-                }
-            } catch (error) {
-                console.error('\n❌ Terjadi error sistem saat mencatat:', error);
-                await sock.sendMessage(senderNumber, { text: '❌ Gagal mencatat ke database' }, { quoted: msg });
+            if (result.success) {
+                const icon = tipe === 'pemasukan' ? '💰' : '💸';
+                const label = tipe === 'pemasukan' ? 'Pemasukan' : 'Pengeluaran';
+                await reply(
+                    `${icon} *${label} dicatat!*\n\n` +
+                    `📝 ${description}\n` +
+                    `💵 ${formatRupiah(amount)}\n\n` +
+                    `📌 Saldo hari ini: *${formatRupiah(result.total)}*`
+                );
+            } else {
+                await reply('❌ Gagal mencatat ke Google Sheets. Coba lagi nanti.');
             }
+        } catch (error) {
+            console.error('\n❌ Error handling message:', error);
+            await reply('❌ Terjadi error. Coba lagi nanti.');
         }
     });
 }
