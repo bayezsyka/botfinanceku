@@ -113,25 +113,43 @@ async function connectToWhatsApp() {
                 }
             }
 
-            // Handle Input Huruf untuk Hapus (a, b, c...)
-            if (textMessage.length === 1 && /^[a-z]$/i.test(textMessage)) {
-                const letter = textMessage.toLowerCase();
-                const session = deleteSession[senderNumber];
+            // Handle Input Huruf untuk Hapus (bisa satu huruf 'a' atau banyak 'abc' / 'a,b,c')
+            const session = deleteSession[senderNumber];
+            if (session && textMessage.length >= 1 && textMessage.length <= 50) {
+                // Bersihkan input agar hanya tersisa huruf a-z (misal "a,b,c" -> "abc")
+                const selectedLetters = textMessage.toLowerCase().replace(/[^a-z]/g, '').split('');
+                
+                // Pastikan semua karakter yang diinput ada di session (validasi)
+                const rowsToDelete = [];
+                const deletedNames = [];
+                
+                selectedLetters.forEach(letter => {
+                    if (session[letter]) {
+                        rowsToDelete.push(session[letter]);
+                        deletedNames.push(session[letter]._rawData[1]); // Ambil deskripsi
+                    }
+                });
 
-                if (session && session[letter]) {
+                if (rowsToDelete.length > 0) {
                     try {
-                        const rowToDelete = session[letter];
-                        const description = rowToDelete._rawData[1];
-                        const amount = rowToDelete._rawData[2];
+                        // SANGAT PENTING: Urutkan dari baris paling bawah (Row Number paling besar) ke atas
+                        // agar penggeseran baris tidak merusak indeks baris yang akan dihapus berikutnya.
+                        rowsToDelete.sort((a, b) => (b._rowNumber || 0) - (a._rowNumber || 0));
 
-                        await rowToDelete.delete(); // Delete baris di Google Sheets
-                        delete deleteSession[senderNumber]; // Clear session
+                        for (const row of rowsToDelete) {
+                            await row.delete();
+                        }
 
-                        await sock.sendMessage(senderNumber, { text: `✅ Berhasil menghapus *${description}* (Rp${amount}) dari catatan hari ini.` }, { quoted: msg });
+                        delete deleteSession[senderNumber]; // Hapus session jika sudah selesai
+                        const confirmMsg = rowsToDelete.length > 1 
+                            ? `✅ Berhasil menghapus ${rowsToDelete.length} item: *${deletedNames.join(', ')}*`
+                            : `✅ Berhasil menghapus *${deletedNames[0]}* dari catatan hari ini.`;
+                        
+                        await sock.sendMessage(senderNumber, { text: confirmMsg }, { quoted: msg });
                         return;
                     } catch (err) {
-                        console.error('Error delete row:', err);
-                        await sock.sendMessage(senderNumber, { text: 'Gagal menghapus data di Google Sheets.' }, { quoted: msg });
+                        console.error('Error batch delete:', err);
+                        await sock.sendMessage(senderNumber, { text: 'Gagal menghapus beberapa data.' }, { quoted: msg });
                         return;
                     }
                 }
