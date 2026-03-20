@@ -38,56 +38,121 @@ const serviceAccountAuth = new JWT({
 const doc = new GoogleSpreadsheet(process.env.SPREADSHEET_ID, serviceAccountAuth);
 
 /**
- * Fungsi untuk menambah data pengeluaran (append row) ke Google Sheets
- * dengan cara manual (koordinat cell) untuk menghindari bug "overwriting".
+ * Fungsi untuk mencatat pengeluaran dengan format Grouping per Hari.
+ * Layout: 
+ * [Hari] | [Waktu] | [Deskripsi] | [Nominal]
+ * [Date] | [Time]  | [Desc]      | [Amount]
+ * Total  |         |             | [Sum]
  */
-export async function catatPengeluaran(tanggal, deskripsi, nominal) {
+export async function catatPengeluaran(tanggalFull, deskripsi, nominal) {
     try {
-        await doc.loadInfo(); 
+        await doc.loadInfo();
         const sheet = doc.sheetsByIndex[0];
 
-        // Ambil baris yang sudah ada untuk menentukan baris kosong berikutnya
+        // Format Tanggal: Sabtu, 28 Agu 2027
+        const dateObj = new Date();
+        const hariIndo = dateObj.toLocaleString('id-ID', { weekday: 'long', day: 'numeric', month: 'short', year: 'numeric' });
+        const waktuIndo = dateObj.toLocaleString('id-ID', { hour: '2-digit', minute: '2-digit', hour12: false }).replace(/:/g, '.');
+
+        // Pastikan header sesuai (Hari, Waktu, Deskripsi, Nominal)
+        await sheet.loadHeaderRow().catch(() => {});
+        if (!sheet.headerValues || sheet.headerValues.length === 0 || sheet.headerValues[0] !== 'Hari') {
+            await sheet.setHeaderRow(['Hari', 'Waktu', 'Deskripsi', 'Nominal']);
+        }
+
         const rows = await sheet.getRows();
-        
-        // Baris 1: Header
-        // Baris 2 s/d (rows.length + 1) : Data existing
-        // Maka baris kosong berikutnya: rows.length + 2
-        const targetRowIndex = rows.length + 1; // getRows mengembalikan data row, indeks 0 di lib = Baris 2 di Sheet
+        let targetBlockTotalRow = -1;
+        let isTodayBlock = false;
 
-        // Load 1 baris target tersebut saja agar efisien
-        // Baris di loadCells menggunakan index 0 (0 = Baris 1/Header, 1 = Baris 2, dst)
-        const nextBlankRowIndex = rows.length + 1;
-        await sheet.loadCells({
-            startRowIndex: nextBlankRowIndex,
-            endRowIndex: nextBlankRowIndex + 1,
-            startColumnIndex: 0,
-            endColumnIndex: 3
-        });
-
-        // Isi Cell secara manual ke Baris yang dituju
-        sheet.getCell(nextBlankRowIndex, 0).value = tanggal;
-        sheet.getCell(nextBlankRowIndex, 1).value = deskripsi;
-        sheet.getCell(nextBlankRowIndex, 2).value = Number(nominal);
-
-        await sheet.saveUpdatedCells();
-
-        // Hitung ulang total harian setelah update (menggunakan data fresh)
-        const updatedRows = await sheet.getRows();
-        const datePrefix = tanggal.split(' ')[0];
-        let totalHarian = 0;
-        
-        updatedRows.forEach(row => {
-            const rowDate = row._rawData[0];
-            if (rowDate && rowDate.startsWith(datePrefix)) {
-                const rawAmount = row._rawData[2] || '0';
-                const rowAmount = parseFloat(rawAmount.toString().replace(/[^\d]/g, ''));
-                if (!isNaN(rowAmount)) totalHarian += rowAmount;
+        // Cari baris "Total" terakhir
+        for (let i = rows.length - 1; i >= 0; i--) {
+            if (rows[i]._rawData[0] === 'Total') {
+                targetBlockTotalRow = i;
+                // Cek apakah blok di atas Total ini adalah hari ini
+                // Kita cari ke atas sampai nemu baris yang ada isi di kolom "Hari" selain "Total"
+                for (let j = i; j >= 0; j--) {
+                    const cellHari = rows[j]._rawData[0];
+                    if (cellHari && cellHari !== 'Total') {
+                        if (cellHari === hariIndo) isTodayBlock = true;
+                        break;
+                    }
+                }
+                break;
             }
-        });
+        }
 
-        return { success: true, total: totalHarian };
+        if (targetBlockTotalRow !== -1 && isTodayBlock) {
+            // JIKA SUDAH ADA BLOK HARI INI: Sisipkan baris baru di ATAS baris Total
+            // Index baris di API: Header(1) + rows[targetBlockTotalRow] index.
+            // Baris Total yang ketemu ada di sheet row number: targetBlockTotalRow + 2
+            const totalRowIndexInSheet = targetBlockTotalRow + 2; 
+
+            // Sisipkan baris
+            await sheet.insertDimension('ROWS', { 
+                startIndex: totalRowIndexInSheet - 1, 
+                endIndex: totalRowIndexInSheet 
+            });
+
+            // Isi baris yang baru disisipkan (Indeks cell 0-based)
+            await sheet.loadCells({
+                startRowIndex: totalRowIndexInSheet - 1,
+                endRowIndex: totalRowIndexInSheet + 1, // Muat baris baru & baris total
+                startColumnIndex: 0,
+                endColumnIndex: 4
+            });
+
+            const newRow = sheet.getCell(totalRowIndexInSheet - 1, 0);
+            sheet.getCell(totalRowIndexInSheet - 1, 1).value = waktuIndo;
+            sheet.getCell(totalRowIndexInSheet - 1, 2).value = deskripsi;
+            sheet.getCell(totalRowIndexInSheet - 1, 3).value = Number(nominal);
+
+            // Update Total (Baris di bawahnya)
+            const totalCell = sheet.getCell(totalRowIndexInSheet, 3);
+            const currentTotal = parseFloat(totalCell.value || 0);
+            const newTotal = currentTotal + Number(nominal);
+            totalCell.value = newTotal;
+
+            await sheet.saveUpdatedCells();
+            return { success: true, total: newTotal };
+
+        } else {
+            // JIKA BELUM ADA BLOK HARI INI: Buat blok baru di paling bawah
+            const startAppendAt = rows.length + 2; // +1 untuk header, +1 untuk baris berikutnya
+
+            // Tambah Spasi Kosong jika bukan blok pertama
+            const rowsToLoad = rows.length > 0 ? 3 : 2;
+            const startRowLoad = rows.length + 1;
+
+            await sheet.loadCells({
+                startRowIndex: startRowLoad,
+                endRowIndex: startRowLoad + rowsToLoad,
+                startColumnIndex: 0,
+                endColumnIndex: 4
+            });
+
+            let currentRow = startRowLoad;
+
+            // Baris Kosong Pemisah
+            if (rows.length > 0) {
+                currentRow++;
+            }
+
+            // Baris Data Pertama
+            sheet.getCell(currentRow, 0).value = hariIndo;
+            sheet.getCell(currentRow, 1).value = waktuIndo;
+            sheet.getCell(currentRow, 2).value = deskripsi;
+            sheet.getCell(currentRow, 3).value = Number(nominal);
+
+            // Baris Total
+            currentRow++;
+            sheet.getCell(currentRow, 0).value = 'Total';
+            sheet.getCell(currentRow, 3).value = Number(nominal);
+
+            await sheet.saveUpdatedCells();
+            return { success: true, total: nominal };
+        }
     } catch (error) {
-        console.error('❌ [Critical Error]:', error);
+        console.error('❌ [Layout Error]:', error);
         return { success: false, total: 0 };
     }
 }
@@ -100,19 +165,29 @@ export async function getTodayData(tanggalSekarang) {
         await doc.loadInfo();
         const sheet = doc.sheetsByIndex[0];
         const rows = await sheet.getRows();
-        const datePrefix = tanggalSekarang.split(' ')[0];
+        
+        const dateObj = new Date();
+        const hariIndo = dateObj.toLocaleString('id-ID', { weekday: 'long', day: 'numeric', month: 'short', year: 'numeric' });
 
-        const todayRows = rows.filter(row => {
-            const rowDate = row._rawData[0];
-            return rowDate && rowDate.startsWith(datePrefix);
-        });
+        // Temukan blok hari ini
+        let inTodayBlock = false;
+        const todayItems = [];
 
-        return todayRows.map(row => ({
-            timestamp: row._rawData[0],
-            description: row._rawData[1],
-            amount: row._rawData[2],
-            originalRow: row
-        }));
+        for (const row of rows) {
+            const hariCell = row._rawData[0];
+            if (hariCell === hariIndo) inTodayBlock = true;
+            else if (hariCell && hariCell !== hariIndo) inTodayBlock = false;
+
+            if (inTodayBlock && row._rawData[0] !== 'Total') {
+                todayItems.push({
+                    timestamp: row._rawData[1],
+                    description: row._rawData[2],
+                    amount: row._rawData[3],
+                    originalRow: row
+                });
+            }
+        }
+        return todayItems;
     } catch (error) {
         return [];
     }
