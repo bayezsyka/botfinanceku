@@ -315,7 +315,7 @@ export async function hapusItems(itemsToDelete) {
 
         // Hapus satu per satu dari bawah ke atas
         for (const sheetIdx of sheetRowIndices) {
-            await sheet._makeBatchUpdateRequest([{
+            await doc._makeBatchUpdateRequest([{
                 deleteDimension: {
                     range: {
                         sheetId: sheet.sheetId,
@@ -363,7 +363,7 @@ export async function hapusItems(itemsToDelete) {
             const dataRowCount = totalRowIndex - blockStartIndex;
             if (dataRowCount <= 0) {
                 // Blok sudah kosong, hapus Total row juga
-                await sheet2._makeBatchUpdateRequest([{
+                await doc._makeBatchUpdateRequest([{
                     deleteDimension: {
                         range: {
                             sheetId: sheet2.sheetId,
@@ -377,7 +377,7 @@ export async function hapusItems(itemsToDelete) {
                 // Re-merge kolom Hari (vertical) jika masih ada data
                 try {
                     // Unmerge dulu supaya tidak error overlap
-                    await sheet2._makeBatchUpdateRequest([{
+                    await doc._makeBatchUpdateRequest([{
                         unmergeCells: {
                             range: {
                                 sheetId: sheet2.sheetId,
