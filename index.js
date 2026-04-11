@@ -208,7 +208,8 @@ async function connectToWhatsApp() {
                 deleteSession[senderNumber] = {};
                 items.forEach((item, index) => {
                     const letter = String.fromCharCode(97 + index);
-                    deleteSession[senderNumber][letter] = item;
+                    // 🔥 Simpan item utuh (termasuk UUID) ke session
+                    deleteSession[senderNumber][letter] = item; 
                     const icon = item.tipe.includes('Masuk') ? '💰' : '💸';
                     listMsg += `*${letter}.* ${icon} ${item.description} — ${formatRupiah(item.amount)}\n`;
                 });
@@ -222,19 +223,18 @@ async function connectToWhatsApp() {
             }
 
             const session = deleteSession[senderNumber];
-            if (session && Object.keys(session).length > 0 && text.length <= 50) {
+            if (session && Object.keys(session).length > 0 && text.length <= 50 && !textLower.startsWith('ping')) {
                 const selectedLetters = textLower.replace(/[^a-z]/g, '').split('');
                 const uniqueLetters = [...new Set(selectedLetters)];
                 const itemsToDelete = [];
                 uniqueLetters.forEach(l => { if (session[l]) itemsToDelete.push(session[l]); });
 
                 if (itemsToDelete.length > 0) {
+                    // 🔥 hapusItems sekarang memproses array objek yang memiliki property uuid
                     const result = await hapusItems(itemsToDelete);
                     delete deleteSession[senderNumber];
                     if (result.success) {
-                        const confirmMsg = itemsToDelete.length > 1
-                            ? `✅ Berhasil menghapus ${itemsToDelete.length} item:\n• ${result.deletedNames.join('\n• ')}`
-                            : `✅ Berhasil menghapus *${result.deletedNames[0]}*!`;
+                        const confirmMsg = `✅ Berhasil menghapus:\n• ${result.deletedNames.join('\n• ')}`;
                         await reply(confirmMsg);
                     } else { await reply('❌ Gagal!'); }
                     return;

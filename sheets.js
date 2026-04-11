@@ -1,5 +1,6 @@
 import { GoogleSpreadsheet } from 'google-spreadsheet';
 import { JWT } from 'google-auth-library';
+import crypto from 'crypto';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -16,54 +17,34 @@ const serviceAccountAuth = new JWT({
 const doc = new GoogleSpreadsheet(process.env.SPREADSHEET_ID, serviceAccountAuth);
 
 let _sheetReady = false;
+
+/** Centralized Error Handler */
+async function handleSheetsError(fnName, error) {
+    console.error(`❌ [Sheets Error in ${fnName}]:`, error.message || error);
+    return null;
+}
+
 export async function ensureSheetReady() {
-    if (!_sheetReady) {
-        await doc.loadInfo();
-        _sheetReady = true;
+    try {
+        if (!_sheetReady) {
+            await doc.loadInfo();
+            _sheetReady = true;
+        }
+        return doc.sheetsByIndex[0];
+    } catch (error) {
+        return handleSheetsError('ensureSheetReady', error);
     }
-    return doc.sheetsByIndex[0];
 }
 
 // ============================================================================
-// HELPER: Tanggal & Waktu WIB
+// HEADER SETUP (Added ID Column)
 // ============================================================================
-function getWIBDate() {
-    const now = new Date();
-    const hariIndo = now.toLocaleString('id-ID', { 
-        timeZone: 'Asia/Jakarta', 
-        weekday: 'long', 
-        day: 'numeric', 
-        month: 'short', 
-        year: 'numeric' 
-    });
-    const waktuIndo = now.toLocaleString('id-ID', { 
-        timeZone: 'Asia/Jakarta', 
-        hour: '2-digit', 
-        minute: '2-digit', 
-        hour12: false 
-    }).replace(/:/g, '.');
-
-    return { hariIndo, waktuIndo };
-}
-
-function formatRupiah(num) {
-    const abs = Math.abs(Number(num));
-    const formatted = abs.toLocaleString('id-ID');
-    return Number(num) < 0 ? `-Rp${formatted}` : `Rp${formatted}`;
-}
-
-// ============================================================================
-// HEADER SETUP
-// ============================================================================
-const HEADERS = ['Hari', 'Waktu', 'Deskripsi', 'Nominal', 'Tipe'];
+const HEADERS = ['Hari', 'Waktu', 'Deskripsi', 'Nominal', 'Tipe', 'ID'];
 
 async function ensureHeaders(sheet) {
     try {
         await sheet.loadHeaderRow();
-        if (!sheet.headerValues || sheet.headerValues.length === 0 || sheet.headerValues[0] !== 'Hari') {
-            await sheet.setHeaderRow(HEADERS);
-        }
-        if (sheet.headerValues.length < 5 || sheet.headerValues[4] !== 'Tipe') {
+        if (!sheet.headerValues || sheet.headerValues.length < 6 || sheet.headerValues[5] !== 'ID') {
             await sheet.setHeaderRow(HEADERS);
         }
     } catch {
@@ -72,19 +53,35 @@ async function ensureHeaders(sheet) {
 }
 
 // ============================================================================
-// CARI BLOK HARI INI
+// HELPERS
 // ============================================================================
+function getWIBDate() {
+    const now = new Date();
+    const hariIndo = now.toLocaleString('id-ID', { 
+        timeZone: 'Asia/Jakarta', weekday: 'long', day: 'numeric', month: 'short', year: 'numeric' 
+    });
+    const waktuIndo = now.toLocaleString('id-ID', { 
+        timeZone: 'Asia/Jakarta', hour: '2-digit', minute: '2-digit', hour12: false 
+    }).replace(/:/g, '.');
+    return { hariIndo, waktuIndo };
+}
+
+/** Dynamic Lookup: Cari baris berdasarkan UUID */
+async function findRowByUUID(sheet, uuid) {
+    if (!uuid) return null;
+    const rows = await sheet.getRows();
+    return rows.find(r => r._rawData[5] === uuid);
+}
+
 function findTodayBlock(rows, hariIndo) {
     let totalRowIndex = -1;
     let blockStartIndex = -1;
     let isTodayBlock = false;
 
-    // Cari baris "Total" terakhir
     for (let i = rows.length - 1; i >= 0; i--) {
         const cellHari = rows[i]._rawData[0];
         if (cellHari === 'Total') {
             totalRowIndex = i;
-            // Cari label hari ke atas
             for (let j = i; j >= 0; j--) {
                 const rowHari = rows[j]._rawData[0];
                 if (rowHari && rowHari !== 'Total') {
@@ -96,43 +93,39 @@ function findTodayBlock(rows, hariIndo) {
             break;
         }
     }
-
     return { totalRowIndex, blockStartIndex, isTodayBlock };
 }
 
 // ============================================================================
-// CATAT PENGELUARAN / PEMASUKAN
+// CORE OPERATIONS
 // ============================================================================
 export async function catatTransaksi(deskripsi, nominal, tipe = 'pengeluaran') {
     try {
         const sheet = await ensureSheetReady();
+        if (!sheet) throw new Error('Sheet not accessible');
         await ensureHeaders(sheet);
 
         const { hariIndo, waktuIndo } = getWIBDate();
+        const uuid = crypto.randomUUID();
         const rows = await sheet.getRows();
         const { totalRowIndex, blockStartIndex, isTodayBlock } = findTodayBlock(rows, hariIndo);
 
         if (totalRowIndex !== -1 && isTodayBlock) {
-            // SISIPKAN DI ATAS TOTAL
             const totalRowSheetIdx = totalRowIndex + 2;
-            await sheet.insertDimension('ROWS', {
-                startIndex: totalRowSheetIdx - 1,
-                endIndex: totalRowSheetIdx
-            });
-
+            await sheet.insertDimension('ROWS', { startIndex: totalRowSheetIdx - 1, endIndex: totalRowSheetIdx });
+            
             await sheet.loadCells({
                 startRowIndex: totalRowSheetIdx - 1,
                 endRowIndex: totalRowSheetIdx + 1,
-                startColumnIndex: 0,
-                endColumnIndex: 5
+                startColumnIndex: 0, endColumnIndex: 6
             });
 
             sheet.getCell(totalRowSheetIdx - 1, 1).value = waktuIndo;
             sheet.getCell(totalRowSheetIdx - 1, 2).value = deskripsi;
             sheet.getCell(totalRowSheetIdx - 1, 3).value = Number(nominal);
             sheet.getCell(totalRowSheetIdx - 1, 4).value = tipe === 'pemasukan' ? '💰 Masuk' : '💸 Keluar';
+            sheet.getCell(totalRowSheetIdx - 1, 5).value = uuid;
 
-            // Update Total
             const totalCell = sheet.getCell(totalRowSheetIdx, 3);
             const currentTotal = parseFloat(totalCell.value || 0);
             const delta = tipe === 'pemasukan' ? Number(nominal) : -Number(nominal);
@@ -140,267 +133,135 @@ export async function catatTransaksi(deskripsi, nominal, tipe = 'pengeluaran') {
             totalCell.value = newTotal;
 
             await sheet.saveUpdatedCells();
-
-            // Re-merge
-            try {
-                await doc._makeBatchUpdateRequest([{
-                    mergeCells: {
-                        range: {
-                            sheetId: sheet.sheetId,
-                            startRowIndex: blockStartIndex + 1,
-                            endRowIndex: totalRowSheetIdx,
-                            startColumnIndex: 0,
-                            endColumnIndex: 1
-                        },
-                        mergeType: 'MERGE_ALL'
-                    }
-                }]);
-            } catch (mergeErr) {}
-
             return { success: true, total: newTotal };
-
         } else {
             // BLOK BARU
-            const startLoadIdx = rows.length + 1;
-            const hasRows = rows.length > 0;
-            const spacerOffset = hasRows ? 1 : 0;
-            const dataRowIdx = startLoadIdx + spacerOffset;
+            const dataRowIdx = rows.length + (rows.length > 0 ? 2 : 1);
             const totalRowIdx = dataRowIdx + 1;
 
             await sheet.loadCells({
-                startRowIndex: startLoadIdx,
-                endRowIndex: totalRowIdx + 1,
-                startColumnIndex: 0,
-                endColumnIndex: 5
+                startRowIndex: dataRowIdx, endRowIndex: totalRowIdx + 1,
+                startColumnIndex: 0, endColumnIndex: 6
             });
 
-            // Day label + first item
-            const cellHari = sheet.getCell(dataRowIdx, 0);
-            cellHari.value = hariIndo;
-            cellHari.verticalAlignment = 'MIDDLE';
-            cellHari.horizontalAlignment = 'CENTER';
-            cellHari.textFormat = { bold: true };
-
+            sheet.getCell(dataRowIdx, 0).value = hariIndo;
             sheet.getCell(dataRowIdx, 1).value = waktuIndo;
             sheet.getCell(dataRowIdx, 2).value = deskripsi;
             sheet.getCell(dataRowIdx, 3).value = Number(nominal);
             sheet.getCell(dataRowIdx, 4).value = tipe === 'pemasukan' ? '💰 Masuk' : '💸 Keluar';
+            sheet.getCell(dataRowIdx, 5).value = uuid;
 
-            // Total row
-            const cellTotalDesc = sheet.getCell(totalRowIdx, 0);
-            cellTotalDesc.value = 'Total';
+            sheet.getCell(totalRowIdx, 0).value = 'Total';
             const cellTotalVal = sheet.getCell(totalRowIdx, 3);
             cellTotalVal.value = tipe === 'pemasukan' ? Number(nominal) : -Number(nominal);
 
-            // Styling
-            for (let c = 0; c < 5; c++) {
-                const cell = sheet.getCell(totalRowIdx, c);
-                cell.backgroundColor = { red: 0.93, green: 0.93, blue: 0.93 };
-                cell.textFormat = { bold: true };
-            }
-
             await sheet.saveUpdatedCells();
-
-            // Merge Total
-            try {
-                await doc._makeBatchUpdateRequest([{
-                    mergeCells: {
-                        range: {
-                            sheetId: sheet.sheetId,
-                            startRowIndex: totalRowIdx,
-                            endRowIndex: totalRowIdx + 1,
-                            startColumnIndex: 0,
-                            endColumnIndex: 3
-                        },
-                        mergeType: 'MERGE_ALL'
-                    }
-                }]);
-            } catch (mergeErr) {}
-
             return { success: true, total: cellTotalVal.value };
         }
     } catch (error) {
-        console.error('❌ [catatTransaksi Error]:', error.message || error);
+        await handleSheetsError('catatTransaksi', error);
         return { success: false, total: 0 };
     }
 }
 
-export async function catatPengeluaran(tanggalFull, deskripsi, nominal) {
-    return catatTransaksi(deskripsi, nominal, 'pengeluaran');
-}
-
-export async function catatPemasukan(deskripsi, nominal) {
-    return catatTransaksi(deskripsi, nominal, 'pemasukan');
-}
-
-// ============================================================================
-// GET DATA HARI INI
-// ============================================================================
 export async function getTodayData() {
     try {
         const sheet = await ensureSheetReady();
-        await ensureHeaders(sheet);
+        if (!sheet) return [];
         const rows = await sheet.getRows();
         const { hariIndo } = getWIBDate();
-
         let inTodayBlock = false;
         const todayItems = [];
 
         for (let i = 0; i < rows.length; i++) {
             const hariCell = rows[i]._rawData[0];
-
             if (hariCell === hariIndo) inTodayBlock = true;
-            else if (hariCell && hariCell !== '' && hariCell !== hariIndo && hariCell !== 'Total') inTodayBlock = false;
-
-            if (hariCell === 'Total') {
-                if (inTodayBlock) break;
-                continue;
-            }
+            else if (hariCell && hariCell !== 'Total' && hariCell !== hariIndo) inTodayBlock = false;
+            
+            if (hariCell === 'Total') { if (inTodayBlock) break; continue; }
 
             if (inTodayBlock) {
                 const desc = rows[i]._rawData[2] || '';
-                const amt = rows[i]._rawData[3] || '0';
-                const tipe = rows[i]._rawData[4] || '💸 Keluar';
-
-                if (desc) {
+                const uuid = rows[i]._rawData[5] || '';
+                if (desc && !desc.includes('[DELETED]')) {
                     todayItems.push({
                         waktu: rows[i]._rawData[1] || '',
                         description: desc,
-                        amount: amt,
-                        tipe,
-                        sheetRowIndex: i + 2,
+                        amount: rows[i]._rawData[3] || '0',
+                        tipe: rows[i]._rawData[4] || '💸 Keluar',
+                        uuid: uuid
                     });
                 }
             }
         }
         return todayItems;
     } catch (error) {
+        await handleSheetsError('getTodayData', error);
         return [];
     }
 }
 
-// ============================================================================
-// HAPUS ITEM
-// ============================================================================
 export async function hapusItems(itemsToDelete) {
     try {
-        _sheetReady = false;
         const sheet = await ensureSheetReady();
-        await ensureHeaders(sheet);
-        const { hariIndo } = getWIBDate();
+        if (!sheet) throw new Error('Sheet not accessible');
+        const deletedNames = [];
 
-        // Sort Bottom-to-Top
-        const sheetRowIndices = [...new Set(itemsToDelete.map(item => item.sheetRowIndex))];
-        sheetRowIndices.sort((a, b) => b - a);
+        for (const item of itemsToDelete) {
+            const row = await findRowByUUID(sheet, item.uuid);
+            if (row) {
+                const currentDesc = row._rawData[2];
+                const currentAmount = parseFloat(row._rawData[3] || 0);
+                const currentTipe = row._rawData[4] || '';
 
-        const deletedNames = itemsToDelete.map(item => item.description);
+                // Soft Delete (Opsi A)
+                row._rawData[2] = `[DELETED] ${currentDesc}`;
+                row._rawData[3] = 0;
+                await row.save();
 
-        for (const idx of sheetRowIndices) {
-            await doc._makeBatchUpdateRequest([{
-                deleteDimension: {
-                    range: {
-                        sheetId: sheet.sheetId,
-                        dimension: 'ROWS',
-                        startIndex: idx - 1,
-                        endIndex: idx
+                // Sync Total
+                const rows = await sheet.getRows();
+                for (let i = row.rowNumber - 1; i < rows.length; i++) {
+                    if (rows[i]._rawData[0] === 'Total') {
+                        const currentTotal = parseFloat(rows[i]._rawData[3] || 0);
+                        const delta = currentTipe.includes('Masuk') ? -currentAmount : currentAmount;
+                        rows[i]._rawData[3] = currentTotal + delta;
+                        await rows[i].save();
+                        break;
                     }
                 }
-            }]);
+                deletedNames.push(currentDesc);
+            }
         }
-
-        // Cleanup empty blocks
-        await cleanupAllStaleBlocks(sheet);
-
+        invalidateCache();
         return { success: true, deletedNames };
     } catch (error) {
-        console.error('❌ [hapusItems Error]:', error.message || error);
+        await handleSheetsError('hapusItems', error);
         return { success: false, deletedNames: [] };
     }
 }
 
-// ============================================================================
-// CLEANUP STALE BLOCKS
-// ============================================================================
-export async function cleanupAllStaleBlocks(sheet) {
-    const rows = await sheet.getRows();
-    const requests = [];
+export async function resetSemuaData() {
+    try {
+        const sheet = await ensureSheetReady();
+        if (!sheet) throw new Error('Sheet not accessible');
+        
+        await doc._makeBatchUpdateRequest([{
+            unmergeCells: { range: { sheetId: sheet.sheetId, startRowIndex: 0, startColumnIndex: 0 } }
+        }]);
 
-    for (let i = rows.length - 1; i >= 0; i--) {
-        if (rows[i]._rawData[0] === 'Total') {
-            const totalIndex = i;
-            let foundData = false;
-            let blockStart = -1;
-
-            for (let j = i - 1; j >= 0; j--) {
-                const head = rows[j]._rawData[0];
-                const desc = rows[j]._rawData[2];
-                
-                // Break if we hit a different block's end
-                if (head === 'Total') break;
-
-                if (head && head !== 'Total') {
-                    blockStart = j;
-                    if (desc) foundData = true;
-                    // Dont break yet, check if THIS specific row has data
-                } else if (desc) {
-                    foundData = true;
-                }
-            }
-
-            if (!foundData) {
-                // Delete Total row
-                requests.push({
-                    deleteDimension: {
-                        range: {
-                            sheetId: sheet.sheetId,
-                            dimension: 'ROWS',
-                            startIndex: totalIndex + 1,
-                            endIndex: totalIndex + 2
-                        }
-                    }
-                });
-                
-                // Delete Day Label row if exists
-                if (blockStart !== -1) {
-                    requests.push({
-                        deleteDimension: {
-                            range: {
-                                sheetId: sheet.sheetId,
-                                dimension: 'ROWS',
-                                startIndex: blockStart + 1,
-                                endIndex: blockStart + 2
-                            }
-                        }
-                    });
-                }
-
-                // Delete spacers around it (if empty)
-                if (totalIndex > 0 && !rows[totalIndex - 1]._rawData[0] && !rows[totalIndex - 1]._rawData[2] && totalIndex - 1 !== blockStart) {
-                     requests.push({
-                        deleteDimension: {
-                            range: {
-                                sheetId: sheet.sheetId,
-                                dimension: 'ROWS',
-                                startIndex: totalIndex,
-                                endIndex: totalIndex + 1
-                            }
-                        }
-                    });
-                }
-            }
-        }
-    }
-
-    if (requests.length > 0) {
-        // Execute back to front to avoid index shift
-        requests.sort((a, b) => b.deleteDimension.range.startIndex - a.deleteDimension.range.startIndex);
-        await doc._makeBatchUpdateRequest(requests);
+        await sheet.clearRows();
+        await sheet.resize({ rowCount: 100, columnCount: HEADERS.length });
+        await ensureHeaders(sheet);
+        
+        invalidateCache();
+        return true;
+    } catch (error) {
+        await handleSheetsError('resetSemuaData', error);
+        return false;
     }
 }
 
-// ============================================================================
-// RANGKUMAN
-// ============================================================================
 export async function getRangkumanHariIni() {
     const items = await getTodayData();
     if (items.length === 0) return null;
@@ -432,7 +293,7 @@ export async function getRangkumanBulanIni() {
             const tipe = row._rawData[4] || '💸 Keluar';
 
             if (hariCell && hariCell !== 'Total' && hariCell.includes(bulanTahunNow)) { currentDay = hariCell; hariCount++; }
-            if (hariCell === 'Total' || !desc) continue;
+            if (hariCell === 'Total' || !desc || desc.includes('[DELETED]')) continue;
             if (currentDay.includes(bulanTahunNow)) {
                 if (tipe.includes('Masuk')) totalMasuk += amt; else totalKeluar += amt;
             }
@@ -442,34 +303,4 @@ export async function getRangkumanBulanIni() {
 }
 
 export function invalidateCache() { _sheetReady = false; }
-
-export async function resetSemuaData() {
-    try {
-        const sheet = await ensureSheetReady();
-        
-        // Unmerge all cells first
-        await doc._makeBatchUpdateRequest([{
-            unmergeCells: {
-                range: {
-                    sheetId: sheet.sheetId,
-                    startRowIndex: 0,
-                    startColumnIndex: 0
-                }
-            }
-        }]);
-
-        // Clear all data rows
-        await sheet.clearRows();
-        
-        // Reset sheet size and headers
-        await sheet.resize({ rowCount: 100, columnCount: HEADERS.length });
-        await ensureHeaders(sheet);
-        
-        invalidateCache();
-        return true;
-    } catch (error) {
-        console.error('❌ [resetSemuaData Error]:', error.message || error);
-        return false;
-    }
-}
-
+export async function cleanupAllStaleBlocks() { return true; } // Placeholder for compatibility
