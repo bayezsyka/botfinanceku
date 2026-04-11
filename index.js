@@ -14,11 +14,15 @@ import {
     invalidateCache,
     cleanupAllStaleBlocks,
     ensureSheetReady,
+    resetSemuaData,
 } from './sheets.js';
 
 dotenv.config();
 
-const OWNER_NUMBER = '6287721031021@s.whatsapp.net';
+const OWNER_NUMBERS = [
+    '6287721031021@s.whatsapp.net',
+    '84306181542117@lid'
+];
 const BOT_NUMBER = '6285161603362';
 
 const deleteSession = {};
@@ -56,6 +60,7 @@ Contoh: +gaji 5jt, +freelance 500k
 ━━━ ℹ️ *Lainnya* ━━━
 • *ping* — Cek apakah bot aktif
 • *bersih* — Bersihkan baris kosong di Sheet
+• *reset* — Hapus SEMUA data di Google Sheet
 • *menu* atau *help* — Tampilkan menu ini
 
 💡 _Suffix angka: k/rb = ribu, jt = juta_`;
@@ -72,9 +77,11 @@ function initCron() {
         cron.schedule(`0 0 ${hour} * * *`, async () => {
             if (sock) {
                 console.log(`[⏰ Cron] Sending reminder for ${hour}:00`);
-                await sock.sendMessage(OWNER_NUMBER, { 
-                    text: '⚠️ *REMINDER FINANCE* ⚠️\n\nAda pengeluaran yang belum dicatet ngga boss?? Biar ngga lupa langsung ketik aja ya! 📊' 
-                });
+                for (const num of OWNER_NUMBERS) {
+                    await sock.sendMessage(num, { 
+                        text: '⚠️ *REMINDER FINANCE* ⚠️\n\nAda pengeluaran yang belum dicatet ngga boss?? Biar ngga lupa langsung ketik aja ya! 📊' 
+                    });
+                }
             }
         }, {
             scheduled: true,
@@ -94,7 +101,7 @@ async function connectToWhatsApp() {
     sock = makeWASocket({
         version,
         auth: state,
-        logger: pino({ level: 'silent' }),
+        logger: pino({ level: 'info' }),
         browser: Browsers.macOS('Desktop')
     });
 
@@ -118,7 +125,11 @@ async function connectToWhatsApp() {
         const msg = m.messages[0];
         if (!msg.message || msg.key.fromMe) return;
         const senderNumber = msg.key.remoteJid;
-        if (senderNumber !== OWNER_NUMBER) return;
+        console.log(`[🔎 Check] Incoming message from: ${senderNumber}`);
+        if (!OWNER_NUMBERS.includes(senderNumber)) {
+            console.log(`[⚠️ Skip] Message from non-owner ignored.`);
+            return;
+        }
 
         const textMessage = msg.message.conversation || msg.message.extendedTextMessage?.text;
         if (!textMessage) return;
@@ -140,6 +151,18 @@ async function connectToWhatsApp() {
                 const sheet = await ensureSheetReady();
                 await cleanupAllStaleBlocks(sheet);
                 await reply('✅ Google Sheets sudah rapi kembali!');
+                return;
+            }
+
+            // COMMAND: reset
+            if (textLower === 'reset' || textLower === 'reset data') {
+                await reply('⚠️ Sedang menghapus SEMUA data di Google Sheets...');
+                const success = await resetSemuaData();
+                if (success) {
+                    await reply('✅ Berhasil! Semua data telah dihapus dan Sheet kembali bersih.');
+                } else {
+                    await reply('❌ Gagal mereset data. Silakan cek koneksi atau Google Sheet Anda.');
+                }
                 return;
             }
 

@@ -442,3 +442,34 @@ export async function getRangkumanBulanIni() {
 }
 
 export function invalidateCache() { _sheetReady = false; }
+
+export async function resetSemuaData() {
+    try {
+        const sheet = await ensureSheetReady();
+        
+        // Unmerge all cells first
+        await doc._makeBatchUpdateRequest([{
+            unmergeCells: {
+                range: {
+                    sheetId: sheet.sheetId,
+                    startRowIndex: 0,
+                    startColumnIndex: 0
+                }
+            }
+        }]);
+
+        // Clear all data rows
+        await sheet.clearRows();
+        
+        // Reset sheet size and headers
+        await sheet.resize({ rowCount: 100, columnCount: HEADERS.length });
+        await ensureHeaders(sheet);
+        
+        invalidateCache();
+        return true;
+    } catch (error) {
+        console.error('❌ [resetSemuaData Error]:', error.message || error);
+        return false;
+    }
+}
+
