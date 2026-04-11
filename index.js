@@ -15,7 +15,9 @@ import {
     cleanupAllStaleBlocks,
     ensureSheetReady,
     resetSemuaData,
+    getDataMingguIni
 } from './sheets.js';
+import { generateRangkumanFoto, generateGrafikMingguIni } from './visuals.js';
 
 dotenv.config();
 
@@ -60,7 +62,9 @@ Contoh: +gaji 5jt, +freelance 500k
 ━━━ ℹ️ *Lainnya* ━━━
 • *ping* — Cek apakah bot aktif
 • *bersih* — Bersihkan baris kosong di Sheet
-• *reset* — Hapus SEMUA data di Google Sheet
+• *reset* — Hapus SEMUA data
+• *rangkuman foto* — Generate tabel rangkuman hari ini (Gambar)
+• *grafik* — Generate visualisasi Chart saldo mingguan (Gambar)
 • *menu* atau *help* — Tampilkan menu ini
 
 💡 _Suffix angka: k/rb = ribu, jt = juta_`;
@@ -180,6 +184,36 @@ async function connectToWhatsApp() {
                 if (data.totalKeluar > 0) msg += `\n💸 Total Keluar : *${formatRupiah(data.totalKeluar)}*`;
                 msg += `\n📌 *Saldo Hari Ini : ${formatRupiah(data.saldo)}*`;
                 await reply(msg); return;
+            }
+
+            // COMMAND: rangkuman foto
+            if (textLower === 'rangkuman foto') {
+                await reply('📸 Sedang generate gambar rangkuman hari ini, tunggu sebentar...');
+                const data = await getRangkumanHariIni();
+                if (!data) { await reply('📭 Belum ada transaksi hari ini.'); return; }
+                
+                const imageBuffer = await generateRangkumanFoto(data);
+                if (imageBuffer) {
+                    await sock.sendMessage(senderNumber, { image: imageBuffer, caption: '📊 *Rangkuman Transaksi Hari Ini*' }, { quoted: msg });
+                } else {
+                    await reply('❌ Gagal memuat gambar/grafik.');
+                }
+                return;
+            }
+
+            // COMMAND: grafik
+            if (textLower === 'grafik') {
+                await reply('📈 Sedang menyusun chart saldo, tunggu sebentar...');
+                const dataMingguan = await getDataMingguIni();
+                if (!dataMingguan || dataMingguan.length === 0) { await reply('📭 Belum ada data yang cukup untuk grafik.'); return; }
+                
+                const buffer = await generateGrafikMingguIni(dataMingguan);
+                if (buffer) {
+                    await sock.sendMessage(senderNumber, { image: buffer, caption: '📉 *Grafik Saldo 7 Hari Terakhir*' }, { quoted: msg });
+                } else {
+                    await reply('❌ Gagal memuat gambar/grafik.');
+                }
+                return;
             }
 
             // COMMAND: bulan ini

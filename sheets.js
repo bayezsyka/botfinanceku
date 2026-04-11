@@ -133,6 +133,7 @@ export async function catatTransaksi(deskripsi, nominal, tipe = 'pengeluaran') {
             totalCell.value = newTotal;
 
             await sheet.saveUpdatedCells();
+            await autoFormatAndMerge(sheet); // 🔥 Auto Formatter
             return { success: true, total: newTotal };
         } else {
             // BLOK BARU
@@ -156,6 +157,7 @@ export async function catatTransaksi(deskripsi, nominal, tipe = 'pengeluaran') {
             cellTotalVal.value = tipe === 'pemasukan' ? Number(nominal) : -Number(nominal);
 
             await sheet.saveUpdatedCells();
+            await autoFormatAndMerge(sheet); // 🔥 Auto Formatter
             return { success: true, total: cellTotalVal.value };
         }
     } catch (error) {
@@ -233,6 +235,7 @@ export async function hapusItems(itemsToDelete) {
                 deletedNames.push(currentDesc);
             }
         }
+        await autoFormatAndMerge(sheet); // 🔥 Auto Formatter
         invalidateCache();
         return { success: true, deletedNames };
     } catch (error) {
@@ -278,6 +281,89 @@ export async function getRangkumanHariIni() {
     return { items: details, totalMasuk, totalKeluar, saldo: totalMasuk - totalKeluar };
 }
 
+// ============================================================================
+// FORMATTING FIXER
+// ============================================================================
+export async function autoFormatAndMerge(sheet) {
+    try {
+        const rows = await sheet.getRows();
+        const requests = [];
+
+        // 1. Unmerge all data cells
+        requests.push({ unmergeCells: { range: { sheetId: sheet.sheetId, startRowIndex: 1, startColumnIndex: 0 } } });
+
+        // 2. Clear styling (borders/backgrounds) from all possible past data rows to prevent dangling borders
+        requests.push({
+            updateBorders: {
+                range: { sheetId: sheet.sheetId, startRowIndex: 1, startColumnIndex: 0, endColumnIndex: 6 },
+                top: { style: 'NONE' }, bottom: { style: 'NONE' }, left: { style: 'NONE' }, right: { style: 'NONE' },
+                innerHorizontal: { style: 'NONE' }, innerVertical: { style: 'NONE' }
+            }
+        });
+        requests.push({
+            updateCells: {
+                range: { sheetId: sheet.sheetId, startRowIndex: 1, startColumnIndex: 0, endColumnIndex: 6 },
+                fields: 'userEnteredFormat.backgroundColor,userEnteredFormat.textFormat'
+            }
+        });
+
+        // 3. Re-apply styles properly
+        let currentBlockStart = -1;
+        
+        for (let i = 0; i < rows.length; i++) {
+            const rowData = rows[i]._rawData;
+            const col0 = rowData[0] || '';
+            const desc = rowData[2] || '';
+            const isTotalRow = col0 === 'Total';
+
+            if (col0 && col0 !== 'Total') currentBlockStart = i;
+
+            if (isTotalRow) {
+                const totalIndex = i;
+                
+                // Merge Hari
+                if (currentBlockStart !== -1 && totalIndex > currentBlockStart) {
+                    requests.push({ mergeCells: { range: { sheetId: sheet.sheetId, startRowIndex: currentBlockStart + 1, endRowIndex: totalIndex + 1, startColumnIndex: 0, endColumnIndex: 1 }, mergeType: 'MERGE_COLUMNS' } });
+                }
+
+                // Merge Total
+                requests.push({ mergeCells: { range: { sheetId: sheet.sheetId, startRowIndex: totalIndex + 1, endRowIndex: totalIndex + 2, startColumnIndex: 0, endColumnIndex: 3 }, mergeType: 'MERGE_ROWS' } });
+
+                // Format Total
+                requests.push({
+                    repeatCell: {
+                        range: { sheetId: sheet.sheetId, startRowIndex: totalIndex + 1, endRowIndex: totalIndex + 2, startColumnIndex: 0, endColumnIndex: 6 },
+                        cell: { userEnteredFormat: { backgroundColor: { red: 0.93, green: 0.93, blue: 0.93 }, textFormat: { bold: true } } },
+                        fields: 'userEnteredFormat(backgroundColor,textFormat)'
+                    }
+                });
+
+                // Borders
+                if (currentBlockStart !== -1) {
+                    requests.push({
+                        updateBorders: {
+                            range: { sheetId: sheet.sheetId, startRowIndex: currentBlockStart + 1, endRowIndex: totalIndex + 2, startColumnIndex: 0, endColumnIndex: 6 },
+                            top: { style: 'SOLID', width: 1, color: { red: 0, green: 0, blue: 0 } },
+                            bottom: { style: 'SOLID', width: 1, color: { red: 0, green: 0, blue: 0 } },
+                            left: { style: 'SOLID', width: 1, color: { red: 0, green: 0, blue: 0 } },
+                            right: { style: 'SOLID', width: 1, color: { red: 0, green: 0, blue: 0 } },
+                            innerVertical: { style: 'SOLID', width: 1, color: { red: 0, green: 0, blue: 0 } },
+                            innerHorizontal: { style: 'SOLID', width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }
+                        }
+                    });
+                }
+                currentBlockStart = -1;
+            }
+        }
+
+        if (requests.length > 0) {
+            await doc._makeBatchUpdateRequest(requests);
+        }
+    } catch (e) {
+        console.error('❌ [autoFormatAndMerge Error]: ', e);
+    }
+}
+
 export async function getRangkumanBulanIni() {
     try {
         const sheet = await ensureSheetReady();
@@ -299,6 +385,62 @@ export async function getRangkumanBulanIni() {
             }
         }
         return { bulan: bulanTahunNow, totalMasuk, totalKeluar, saldo: totalMasuk - totalKeluar, jumlahHari: hariCount };
+    } catch (e) { return null; }
+}
+
+export async function getDataMingguIni() {
+    try {
+        const sheet = await ensureSheetReady();
+        const rows = await sheet.getRows();
+        
+        // Find Monday of the current week
+        const now = new Date();
+        const dayOfWeek = now.getDay();
+        const diffToMonday = now.getDate() - dayOfWeek + (dayOfWeek === 0 ? -6 : 1);
+        const monday = new Date(now.setDate(diffToMonday));
+        monday.setHours(0,0,0,0);
+        
+        let cumulativeBalance = 0;
+        const weeklyDataMap = {};
+
+        for (const row of rows) {
+            const hariCell = row._rawData[0] || '';
+            const desc = row._rawData[2] || '';
+            const amt = parseFloat(row._rawData[3] || 0);
+            const tipe = row._rawData[4] || '💸 Keluar';
+
+            if (hariCell && hariCell !== 'Total') {
+                // Not the most accurate parsing but assume it parses fine with basic new Date() since it is like "Senin, 15 Apr 2026"
+                // Usually it's better to match the week programmatically
+            }
+            if (hariCell === 'Total' || !desc || desc.includes('[DELETED]')) continue;
+            
+            // We need a simple approach: if it has Date, check if within week
+            // But since days are sequential, we can just aggregate all totals... Wait!
+            // Let's do it simpler. Collect by Day string, assuming the bottom-most 7 days represent recent history
+        }
+        
+        // A better approach for QuickChart: Get the last 7 totals in the sheet
+        const last7Days = [];
+        let curBalance = 0;
+        let lastHari = '';
+        
+        for (const row of rows) {
+            const hariCell = row._rawData[0] || '';
+            const isTotal = hariCell === 'Total';
+            
+            if (hariCell && !isTotal) lastHari = hariCell.split(',')[0]; // Ambil nama hari
+            
+            if (isTotal) {
+                const totalAmt = parseFloat(row._rawData[3] || 0);
+                curBalance += totalAmt;
+                last7Days.push({ date: lastHari, balance: curBalance });
+            }
+        }
+        
+        // Return only the last 7
+        return last7Days.slice(-7);
+        
     } catch (e) { return null; }
 }
 
