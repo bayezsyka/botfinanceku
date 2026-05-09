@@ -12,4 +12,8 @@ export function getTodayStr(): string {
   return dayjs().tz(env.TZ).format('YYYY-MM-DD');
 }
 
+export function getYesterdayStr(): string {
+  return dayjs().tz(env.TZ).subtract(1, 'day').format('YYYY-MM-DD');
+}
+
 export { dayjs };

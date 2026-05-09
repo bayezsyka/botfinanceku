@@ -10,7 +10,7 @@ import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
 import { expenseService } from '../modules/expenses/expense.service.js';
 import { dailyReportService } from '../modules/reports/daily-report.service.js';
-import { getTodayStr } from '../utils/date.js';
+import { getTodayStr, getYesterdayStr } from '../utils/date.js';
 import { initReportScheduler } from '../modules/reports/daily-report.scheduler.js';
 
 export async function connectToWhatsApp() {
@@ -85,10 +85,25 @@ export async function connectToWhatsApp() {
           continue;
         }
 
+        if (text.toLowerCase() === 'rekap kemarin') {
+          const report = await dailyReportService.generateDailyReport(getYesterdayStr());
+          await sock.sendMessage(senderJid, { text: report });
+          continue;
+        }
+
         if (text.toLowerCase() === 'kirim rekap' || text.toLowerCase() === 'kirim') {
           const report = await dailyReportService.generateDailyReport(getTodayStr());
           // Kirim ke owner dulu
           await sock.sendMessage(senderJid, { text: `Menyiapkan laporan...\n\n${report}\n\n*Laporan di atas juga telah dikirimkan ke Ibu.*` });
+          // Baru kirim ke ibu
+          await sock.sendMessage(`${env.MOTHER_WA_NUMBER}@s.whatsapp.net`, { text: report });
+          continue;
+        }
+
+        if (text.toLowerCase() === 'kirim kemarin') {
+          const report = await dailyReportService.generateDailyReport(getYesterdayStr());
+          // Kirim ke owner dulu
+          await sock.sendMessage(senderJid, { text: `Menyiapkan laporan kemarin...\n\n${report}\n\n*Laporan di atas juga telah dikirimkan ke Ibu.*` });
           // Baru kirim ke ibu
           await sock.sendMessage(`${env.MOTHER_WA_NUMBER}@s.whatsapp.net`, { text: report });
           continue;
