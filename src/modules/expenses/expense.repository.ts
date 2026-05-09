@@ -23,4 +23,13 @@ export const expenseRepository = {
     if (error) throw error;
     return data as Expense[];
   },
+  async deleteExpense(id: string) {
+    const { error } = await supabase
+      .from('expenses')
+      .delete()
+      .eq('id', id);
+
+    if (error) throw error;
+  },
 };
+

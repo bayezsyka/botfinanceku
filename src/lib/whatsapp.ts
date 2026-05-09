@@ -12,6 +12,8 @@ import { expenseService } from '../modules/expenses/expense.service.js';
 import { dailyReportService } from '../modules/reports/daily-report.service.js';
 import { getTodayStr, getYesterdayStr } from '../utils/date.js';
 import { initReportScheduler } from '../modules/reports/daily-report.scheduler.js';
+import { expenseDeleteService } from '../modules/expenses/expense-delete.service.js';
+
 
 export async function connectToWhatsApp() {
   const { state, saveCreds } = await useMultiFileAuthState(env.BAILEYS_AUTH_DIR);
@@ -107,6 +109,21 @@ export async function connectToWhatsApp() {
           // Baru kirim ke ibu
           await sock.sendMessage(`${env.MOTHER_WA_NUMBER}@s.whatsapp.net`, { text: report });
           continue;
+        }
+
+        if (text.toLowerCase() === 'hapus') {
+          const reply = await expenseDeleteService.startDeleteProcess(senderJid);
+          await sock.sendMessage(senderJid, { text: reply });
+          continue;
+        }
+
+        // Check if user is in delete session and sending a number
+        if (/^\d+$/.test(text.trim())) {
+          const deleteReply = await expenseDeleteService.confirmDelete(senderJid, text.trim());
+          if (deleteReply) {
+            await sock.sendMessage(senderJid, { text: deleteReply });
+            continue;
+          }
         }
 
         // Default: parse as expense
