@@ -20,7 +20,7 @@ export const env = {
   TZ: process.env.TZ || 'Asia/Jakarta',
   OWNER_WA_NUMBER: process.env.OWNER_WA_NUMBER!,
   MOTHER_WA_NUMBER: process.env.MOTHER_WA_NUMBER!,
-  DAILY_REPORT_HOUR: parseInt(process.env.DAILY_REPORT_HOUR || '21', 10),
+  DAILY_REPORT_HOUR: parseInt(process.env.DAILY_REPORT_HOUR || '0', 10),
   DAILY_REPORT_MINUTE: parseInt(process.env.DAILY_REPORT_MINUTE || '0', 10),
   SUPABASE_URL: process.env.SUPABASE_URL!,
   SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY!,
