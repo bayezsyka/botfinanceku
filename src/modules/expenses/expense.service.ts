@@ -23,7 +23,7 @@ export const expenseService = {
         'Ignored message because sender is not linked to any workspace'
       );
 
-      return 'Nomor ini belum terhubung ke workspace. Silakan login ke dashboard BotFinanceku lalu hubungkan WhatsApp.';
+      return null;
     }
 
     const parsed = parseExpenseMessage(message);

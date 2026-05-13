@@ -8,6 +8,7 @@ export interface VerifiedWhatsappLink {
   workspace_id: string;
   role: WhatsappRole;
   phone_number: string;
+  wa_jid?: string | null;
   display_name?: string | null;
 }
 
@@ -38,7 +39,7 @@ export const whatsappLinkService = {
 
     const { data, error } = await supabase
       .from('whatsapp_links')
-      .select('id, workspace_id, role, phone_number, display_name')
+      .select('id, workspace_id, role, phone_number, wa_jid, display_name')
       .eq('phone_number', senderPhone)
       .eq('role', 'sender')
       .eq('status', 'verified')
@@ -52,6 +53,24 @@ export const whatsappLinkService = {
     }
 
     return data as VerifiedWhatsappLink | null;
+  },
+
+
+  async getVerifiedReportReceiversByWorkspace(workspaceId: string): Promise<VerifiedWhatsappLink[]> {
+    const { data, error } = await supabase
+      .from('whatsapp_links')
+      .select('id, workspace_id, role, phone_number, wa_jid, display_name')
+      .eq('workspace_id', workspaceId)
+      .eq('role', 'report_receiver')
+      .eq('status', 'verified')
+      .order('verified_at', { ascending: true });
+
+    if (error) {
+      logger.error({ error, workspaceId }, 'Failed to find report receivers');
+      return [];
+    }
+
+    return (data || []) as VerifiedWhatsappLink[];
   },
 
   async handleVerificationMessage(message: string, senderJid: string) {
@@ -94,6 +113,7 @@ export const whatsappLinkService = {
       .from('whatsapp_links')
       .update({
         phone_number: senderPhone,
+        wa_jid: senderJid,
         status: 'verified',
         verified_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),

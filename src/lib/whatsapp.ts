@@ -94,8 +94,62 @@ export async function connectToWhatsApp() {
         }
 
         if (lowerText === 'hapus') {
+          const senderLink = await whatsappLinkService.getVerifiedSenderByPhone(senderPhone);
+
+          if (!senderLink) {
+            continue;
+          }
+
           const response = await expenseDeleteService.startDeleteProcess(senderJid);
-          await sock.sendMessage(senderJid, { text: response });
+
+          if (response) {
+            await sock.sendMessage(senderJid, { text: response });
+          }
+
+          continue;
+        }
+
+        if (lowerText === 'kirim') {
+          const senderLink = await whatsappLinkService.getVerifiedSenderByPhone(senderPhone);
+
+          if (!senderLink) {
+            continue;
+          }
+
+          const receivers = await whatsappLinkService.getVerifiedReportReceiversByWorkspace(
+            senderLink.workspace_id
+          );
+
+          if (receivers.length === 0) {
+            await sock.sendMessage(senderJid, {
+              text: 'Belum ada nomor penerima laporan yang terhubung di workspace ini.',
+            });
+            continue;
+          }
+
+          const report = await dailyReportService.generateDailyReport(
+            getTodayStr(),
+            senderLink.workspace_id,
+            senderLink.display_name
+          );
+
+          let sentCount = 0;
+
+          for (const receiver of receivers) {
+            const targetJid = receiver.wa_jid || `${receiver.phone_number}@lid`;
+
+            try {
+              await sock.sendMessage(targetJid, { text: report });
+              sentCount += 1;
+            } catch (error) {
+              logger.error({ error, receiver }, 'Failed to send report to receiver');
+            }
+          }
+
+          await sock.sendMessage(senderJid, {
+            text: `Laporan hari ini sudah dikirim ke ${sentCount} penerima.`,
+          });
+
           continue;
         }
 
