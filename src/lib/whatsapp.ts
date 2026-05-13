@@ -1,19 +1,19 @@
-import makeWASocket, { 
-  DisconnectReason, 
-  useMultiFileAuthState, 
-  fetchLatestBaileysVersion, 
-  Browsers 
+import makeWASocket, {
+  DisconnectReason,
+  useMultiFileAuthState,
+  fetchLatestBaileysVersion,
+  Browsers,
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import qrcode from 'qrcode-terminal';
 import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
+import { whatsappLinkService } from '../modules/whatsapp-links/whatsapp-link.service.js';
 import { expenseService } from '../modules/expenses/expense.service.js';
 import { dailyReportService } from '../modules/reports/daily-report.service.js';
 import { getTodayStr, getYesterdayStr } from '../utils/date.js';
 import { initReportScheduler } from '../modules/reports/daily-report.scheduler.js';
 import { expenseDeleteService } from '../modules/expenses/expense-delete.service.js';
-
 
 export async function connectToWhatsApp() {
   const { state, saveCreds } = await useMultiFileAuthState(env.BAILEYS_AUTH_DIR);
@@ -40,8 +40,11 @@ export async function connectToWhatsApp() {
     }
 
     if (connection === 'close') {
-      const shouldReconnect = (lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
+      const shouldReconnect =
+        (lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
+
       logger.info({ shouldReconnect }, 'Connection closed, reconnecting...');
+
       if (shouldReconnect) {
         connectToWhatsApp();
       }
@@ -55,85 +58,88 @@ export async function connectToWhatsApp() {
     if (m.type !== 'notify') return;
 
     for (const msg of m.messages) {
-      if (!msg.message || msg.key.fromMe) continue;
-
-      const senderJid = msg.key.remoteJid;
-      if (!senderJid || senderJid.endsWith('@g.us')) continue;
-
-      const text = msg.message.conversation || msg.message.extendedTextMessage?.text;
-      if (!text) continue;
-
-      const senderPhone = senderJid.split('@')[0].split(':')[0];
-      
-      logger.info(`Message from ${senderPhone} (Raw JID: ${senderJid}): ${text}`);
-
-      const allowedOwners = env.OWNER_WA_NUMBER.split(',').map(n => n.trim());
-
-      if (!allowedOwners.includes(senderPhone)) {
-        logger.info(`Ignored message from ${senderPhone} (Not in allowed owners: ${env.OWNER_WA_NUMBER})`);
-        continue;
-      }
-
-      // Handle special commands for testing
       try {
-        if (text.toLowerCase() === 'cek') {
-          await sock.sendMessage(senderJid, { text: 'aman' });
+        if (!msg.message || msg.key.fromMe) continue;
+
+        const senderJid = msg.key.remoteJid;
+        if (!senderJid || senderJid.endsWith('@g.us')) continue;
+
+        const text = msg.message.conversation || msg.message.extendedTextMessage?.text;
+        if (!text) continue;
+
+        const senderPhone = senderJid.split('@')[0].split(':')[0];
+        const normalizedText = text.trim();
+        const lowerText = normalizedText.toLowerCase();
+
+        logger.info(`Message from ${senderPhone} (Raw JID: ${senderJid}): ${normalizedText}`);
+
+        const verificationResponse = await whatsappLinkService.handleVerificationMessage(
+          normalizedText,
+          senderJid
+        );
+
+        if (verificationResponse) {
+          await sock.sendMessage(senderJid, { text: verificationResponse });
           continue;
         }
 
-        if (text.toLowerCase() === 'rekap hari ini') {
-          const report = await dailyReportService.generateDailyReport(getTodayStr());
-          await sock.sendMessage(senderJid, { text: report });
+        const deleteChoiceResponse = await expenseDeleteService.confirmDelete(
+          senderJid,
+          normalizedText
+        );
+
+        if (deleteChoiceResponse) {
+          await sock.sendMessage(senderJid, { text: deleteChoiceResponse });
           continue;
         }
 
-        if (text.toLowerCase() === 'rekap kemarin') {
-          const report = await dailyReportService.generateDailyReport(getYesterdayStr());
-          await sock.sendMessage(senderJid, { text: report });
+        if (lowerText === 'hapus') {
+          const response = await expenseDeleteService.startDeleteProcess(senderJid);
+          await sock.sendMessage(senderJid, { text: response });
           continue;
         }
 
-        if (text.toLowerCase() === 'kirim rekap' || text.toLowerCase() === 'kirim') {
-          const report = await dailyReportService.generateDailyReport(getTodayStr());
-          // Kirim ke owner dulu
-          await sock.sendMessage(senderJid, { text: `Menyiapkan laporan...\n\n${report}\n\n*Laporan di atas juga telah dikirimkan ke Ibu.*` });
-          // Baru kirim ke ibu
-          await sock.sendMessage(`${env.MOTHER_WA_NUMBER}@s.whatsapp.net`, { text: report });
-          continue;
-        }
+        if (lowerText === 'laporan' || lowerText === 'rekap') {
+          const senderLink = await whatsappLinkService.getVerifiedSenderByPhone(senderPhone);
 
-        if (text.toLowerCase() === 'kirim kemarin') {
-          const report = await dailyReportService.generateDailyReport(getYesterdayStr());
-          // Kirim ke owner dulu
-          await sock.sendMessage(senderJid, { text: `Menyiapkan laporan kemarin...\n\n${report}\n\n*Laporan di atas juga telah dikirimkan ke Ibu.*` });
-          // Baru kirim ke ibu
-          await sock.sendMessage(`${env.MOTHER_WA_NUMBER}@s.whatsapp.net`, { text: report });
-          continue;
-        }
-
-        if (text.toLowerCase() === 'hapus') {
-          const reply = await expenseDeleteService.startDeleteProcess(senderJid);
-          await sock.sendMessage(senderJid, { text: reply });
-          continue;
-        }
-
-        // Check if user is in delete session and sending a number
-        if (/^\d+$/.test(text.trim())) {
-          const deleteReply = await expenseDeleteService.confirmDelete(senderJid, text.trim());
-          if (deleteReply) {
-            await sock.sendMessage(senderJid, { text: deleteReply });
+          if (!senderLink) {
             continue;
           }
+
+          const report = await dailyReportService.generateDailyReport(
+            getTodayStr(),
+            senderLink.workspace_id,
+            senderLink.display_name
+          );
+
+          await sock.sendMessage(senderJid, { text: report });
+          continue;
         }
 
-        // Default: parse as expense
-        const reply = await expenseService.handleMessage(text, senderJid);
-        if (reply) {
-          await sock.sendMessage(senderJid, { text: reply }, { quoted: msg });
+        if (lowerText === 'kemarin') {
+          const senderLink = await whatsappLinkService.getVerifiedSenderByPhone(senderPhone);
+
+          if (!senderLink) {
+            continue;
+          }
+
+          const report = await dailyReportService.generateDailyReport(
+            getYesterdayStr(),
+            senderLink.workspace_id,
+            senderLink.display_name
+          );
+
+          await sock.sendMessage(senderJid, { text: report });
+          continue;
+        }
+
+        const response = await expenseService.handleMessage(normalizedText, senderJid);
+
+        if (response) {
+          await sock.sendMessage(senderJid, { text: response });
         }
       } catch (error) {
-        logger.error({ error, text }, 'Error handling message');
-        await sock.sendMessage(senderJid, { text: 'Terjadi kesalahan saat memproses pesan Anda.' });
+        logger.error({ error }, 'Failed to handle incoming WhatsApp message');
       }
     }
   });
