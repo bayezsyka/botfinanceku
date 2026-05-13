@@ -13,23 +13,35 @@ export const expenseRepository = {
     return result;
   },
 
-  async getExpensesByDate(date: string) {
-    const { data, error } = await supabase
+  async getExpensesByDate(date: string, workspaceId?: string | null) {
+    let query = supabase
       .from('expenses')
       .select('*')
       .eq('expense_date', date)
       .order('created_at', { ascending: true });
 
+    if (workspaceId) {
+      query = query.eq('workspace_id', workspaceId);
+    }
+
+    const { data, error } = await query;
+
     if (error) throw error;
     return data as Expense[];
   },
-  async deleteExpense(id: string) {
-    const { error } = await supabase
+
+  async deleteExpense(id: string, workspaceId?: string | null) {
+    let query = supabase
       .from('expenses')
       .delete()
       .eq('id', id);
 
+    if (workspaceId) {
+      query = query.eq('workspace_id', workspaceId);
+    }
+
+    const { error } = await query;
+
     if (error) throw error;
   },
 };
-

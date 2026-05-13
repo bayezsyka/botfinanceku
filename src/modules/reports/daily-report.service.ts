@@ -4,9 +4,9 @@ import { env } from '../../config/env.js';
 import { getTodayStr, getYesterdayStr } from '../../utils/date.js';
 
 export const dailyReportService = {
-  async generateDailyReport(date: string) {
-    const expenses = await expenseRepository.getExpensesByDate(date);
-    const ownerName = env.BOT_OWNER_NAME;
+  async generateDailyReport(date: string, workspaceId?: string | null, ownerNameOverride?: string | null) {
+    const expenses = await expenseRepository.getExpensesByDate(date, workspaceId);
+    const ownerName = ownerNameOverride || env.BOT_OWNER_NAME;
 
     const isToday = date === getTodayStr();
     const isYesterday = date === getYesterdayStr();
@@ -17,10 +17,10 @@ export const dailyReportService = {
     }
 
     const total = expenses.reduce((sum, exp) => sum + exp.amount, 0);
-    
+
     let report = `${ownerName} ${timeRef} menghabiskan uang sebanyak: ${formatRupiah(total)}.\n\n`;
     report += 'Berikut adalah rinciannya:\n';
-    
+
     expenses.forEach((exp, index) => {
       report += `${index + 1}. ${exp.subject} ${formatRupiah(exp.amount)}\n`;
     });
